@@ -58,7 +58,7 @@ strict = true
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["pyarrow", "pyarrow.*", "h5py", "h5py.*", "lerobot", "lerobot.*", "robosuite", "robosuite.*"]
+module = ["pyarrow", "pyarrow.*", "h5py", "h5py.*", "lerobot", "lerobot.*", "robosuite", "robosuite.*", "torch", "torch.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

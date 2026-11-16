@@ -1,6 +1,7 @@
 """The ``bowerbird`` command."""
 
 import argparse
+import pathlib
 import sys
 from collections.abc import Sequence
 
@@ -29,8 +30,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if arguments.command == "score":
             _score(arguments)
-        else:
+        elif arguments.command == "show":
             _show(arguments)
+        else:
+            _bench(arguments)
     except (errors.DatasetError, errors.ScorerError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -65,6 +68,24 @@ def _parser() -> argparse.ArgumentParser:
     show = commands.add_parser("show", help="list the lowest-scoring episodes and why")
     _add_source(show)
     show.add_argument("--worst", type=int, default=20, help="how many episodes to list")
+
+    bench = commands.add_parser(
+        "bench", help="train on curated data and test the result (needs bowerbird[bench])"
+    )
+    steps = bench.add_subparsers(dest="step", required=True)
+    prepare = steps.add_parser("prepare", help="download a robomimic task as a LeRobot dataset")
+    prepare.add_argument("task", help="lift, can or square")
+    prepare.add_argument("data_set", metavar="set", help="mixed or skilled")
+    prepare.add_argument("folder", help="where to keep the download and the dataset")
+    run = steps.add_parser("run", help="curate by one rule, train a policy and test it")
+    run.add_argument("dataset", help="a dataset folder made by `bowerbird bench prepare`")
+    run.add_argument("output", help="the folder for this run's checkpoints and result")
+    run.add_argument("--rule", required=True, help="all, random, length, motion or operator")
+    run.add_argument("--fraction", type=float, default=0.5, help="the share of episodes to keep")
+    run.add_argument("--seed", type=int, default=0, help="the training seed")
+    run.add_argument("--steps", type=int, required=True, help="the number of training steps")
+    run.add_argument("--attempts", type=int, default=200, help="how many test attempts to run")
+    run.add_argument("--device", help="cuda, mps or cpu (default: the best available)")
     return parser
 
 
@@ -120,6 +141,43 @@ def _show(arguments: argparse.Namespace) -> None:
             f"{dataset.name} has no scores yet. Run `bowerbird score {arguments.source}` first."
         )
     _print_worst(table, arguments.worst)
+
+
+def _bench(arguments: argparse.Namespace) -> None:
+    """Runs ``bowerbird bench``.
+
+    Args:
+        arguments: The parsed arguments.
+
+    Raises:
+        ScorerError: The benchmark's extra dependencies are not installed.
+    """
+    try:
+        from bowerbird.bench import robomimic, runs
+    except ImportError as error:
+        raise errors.ScorerError(
+            f"The benchmark needs extra packages ({error.name} is missing). "
+            "Install them with: pip install 'bowerbird[bench]' (Python 3.12 or newer)."
+        ) from error
+
+    if arguments.step == "prepare":
+        folder = pathlib.Path(arguments.folder)
+        source = robomimic.download(arguments.task, arguments.data_set, folder / "source")
+        root = folder / f"{arguments.task}_{arguments.data_set}"
+        robomimic.convert(source, root, arguments.task)
+        print(f"Dataset: {root}")
+        return
+    runs.run(
+        pathlib.Path(arguments.dataset),
+        pathlib.Path(arguments.output),
+        rule=arguments.rule,
+        fraction=arguments.fraction,
+        seed=arguments.seed,
+        steps=arguments.steps,
+        attempts=arguments.attempts,
+        device=arguments.device,
+        log=print,
+    )
 
 
 def _print_worst(table: scores.ScoreTable, count: int) -> None:

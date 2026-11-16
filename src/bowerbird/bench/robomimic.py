@@ -39,6 +39,11 @@ _ROBOT_PARTS = {
     "robot0_gripper_qpos": ("gripper_left", "gripper_right"),
 }
 _OBJECT_PART = "object"
+# The same observations under the names the simulator gives them.
+ROBOT_OBSERVATIONS = tuple(_ROBOT_PARTS)
+OBJECT_OBSERVATION = "object-state"
+STATE = "observation.state"
+ENVIRONMENT_STATE = "observation.environment_state"
 _ACTION_NAMES = ("dx", "dy", "dz", "droll", "dpitch", "dyaw", "gripper")
 _OPERATORS = (1, 2)
 
@@ -134,8 +139,8 @@ def convert(source: pathlib.Path, root: pathlib.Path, task: str) -> pathlib.Path
             for frame in range(len(actions)):
                 dataset.add_frame(
                     {
-                        "observation.state": state[frame].astype(np.float32),
-                        "observation.environment_state": objects[frame].astype(np.float32),
+                        STATE: state[frame].astype(np.float32),
+                        ENVIRONMENT_STATE: objects[frame].astype(np.float32),
                         "action": actions[frame].astype(np.float32),
                         "task": _TASKS[task],
                     }
@@ -191,12 +196,12 @@ def _features(object_width: int) -> dict[str, dict[str, Any]]:
     """
     state_names = [name for names in _ROBOT_PARTS.values() for name in names]
     return {
-        "observation.state": {
+        STATE: {
             "dtype": "float32",
             "shape": (len(state_names),),
             "names": state_names,
         },
-        "observation.environment_state": {
+        ENVIRONMENT_STATE: {
             "dtype": "float32",
             "shape": (object_width,),
             "names": [f"object_{number}" for number in range(object_width)],
