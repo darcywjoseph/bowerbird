@@ -27,3 +27,28 @@ jobs:
       - run: uv run ruff format --check
       - run: uv run mypy
       - run: uv run pytest
+
+  # The plan's target: from install to a quality report in under five minutes,
+  # on a machine with no GPU, with one command. The job's time limit is the test.
+  install-to-report:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.10"
+      - name: Install into a fresh environment
+        run: |
+          uv venv "$RUNNER_TEMP/fresh"
+          uv pip install --python "$RUNNER_TEMP/fresh" .
+      - name: Score a Hub dataset
+        working-directory: ${{ runner.temp }}
+        run: |
+          fresh/bin/bowerbird score lerobot/pusht
+          test -s bowerbird-report.html
+          fresh/bin/bowerbird show lerobot/pusht --worst 5
