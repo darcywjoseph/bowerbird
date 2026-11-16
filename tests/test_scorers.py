@@ -240,3 +240,19 @@ def test_small_tasks_are_pooled_and_large_ones_stand_alone() -> None:
 
     assert groups[:20] == [("big",)] * 20
     assert groups[20:] == [None, None, None]
+
+
+def test_health_flags_only_a_very_short_episode() -> None:
+    lengths = {index: 100 for index in range(20)} | {20: 20, 21: 40}
+    episodes = [conftest.make_episode(i, _smooth(length=n)) for i, n in lengths.items()]
+    few = [
+        conftest.make_episode(i, _smooth(length=n), task="rare") for i, n in ((30, 100), (31, 10))
+    ]
+
+    scorer = health.HealthScorer(check_video=False)
+    scores = {score.episode_index: score for score in scorer.score([*episodes, *few])}
+
+    assert scores[20].score == 0.75
+    assert "only 20% of the median length" in scores[20].segments[0].reason
+    assert scores[21].score == 1.0, "a fast demonstration at 40% of the median is left alone"
+    assert scores[31].score == 1.0, "two episodes are too few to say what is normal"

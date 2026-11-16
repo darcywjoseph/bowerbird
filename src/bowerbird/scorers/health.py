@@ -1,8 +1,10 @@
 """Finds episodes that are broken, as opposed to badly performed.
 
 Checks: the number of frames against the metadata, missing values, dropped
-frames in the timestamps, and cameras that freeze, lose frames or cannot be
-read. The score is the fraction of the episode that no problem touches.
+frames in the timestamps, cameras that freeze, lose frames or cannot be read,
+and an episode far shorter than is normal for its task. The score is the
+fraction of the episode that no problem touches, less a fixed amount for a
+very short episode.
 
 How well the robot follows its commands is not judged here. A robot pushed
 off its command by contact is part of doing the task, so that check belongs
@@ -21,6 +23,11 @@ from bowerbird.io import video
 from bowerbird.scorers import motion, signals
 
 _GAP_RATIO = 1.5
+# An episode this much shorter than is normal for its task was probably cut
+# short. The level is low on purpose: a skilled, fast demonstration is short
+# too, and must not be caught.
+_SHORT_RATIO = 0.25
+_SHORT_PENALTY = 0.25
 # A frozen camera repeats a picture exactly. A camera that watches a robot move
 # slightly shows small changes instead, so the level is set just above zero.
 _FROZEN_CHANGE = 1e-3
@@ -58,7 +65,7 @@ class HealthScorer:
               downloads the video files.
         """
         self.check_video = check_video
-        self.version = "4" if check_video else "4-novideo"
+        self.version = "5" if check_video else "5-novideo"
 
     def score(self, episodes: Iterable[episodes.Episode]) -> Iterator[scores.EpisodeScore]:
         """Scores each episode.
@@ -76,11 +83,29 @@ class HealthScorer:
             if position is not None:
                 position_limits.update(position)
 
-        for episode in episode_list:
+        groups = signals.task_groups(episode_list)
+        lengths_by_group: dict[tuple[str, ...], list[int]] = {}
+        for episode, group in zip(episode_list, groups, strict=True):
+            if group is not None:
+                lengths_by_group.setdefault(group, []).append(episode.length)
+        medians = {group: float(np.median(lengths)) for group, lengths in lengths_by_group.items()}
+
+        for episode, group in zip(episode_list, groups, strict=True):
             draft = self._draft(episode, position_limits)
+            score = 1.0 - signals.coverage(draft.segments, draft.rows) if draft.rows else 0.0
+            # A task with too few episodes has no reliable normal length.
+            median = medians.get(group) if group is not None else None
+            if median and episode.length < _SHORT_RATIO * median:
+                reason = (
+                    f"only {episode.length / median:.0%} of the median length for its task; "
+                    "it may have been cut short"
+                )
+                # The whole episode is marked, but it costs a fixed amount: being
+                # short does not make every frame bad.
+                draft.segments.append(scores.Segment(0, max(draft.rows, 1), 0.0, reason))
+                score -= _SHORT_PENALTY
             segments = sorted(draft.segments, key=lambda s: s.start_frame)
-            score = 1.0 - signals.coverage(segments, draft.rows) if draft.rows else 0.0
-            yield scores.EpisodeScore(draft.index, score, tuple(segments))
+            yield scores.EpisodeScore(draft.index, max(score, 0.0), tuple(segments))
 
     def _draft(self, episode: episodes.Episode, position_limits: signals.Limits) -> _Draft:
         """Runs every check on one episode.
