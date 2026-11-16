@@ -168,8 +168,24 @@ def positions(episode: episodes.Episode) -> npt.NDArray[Any] | None:
         The measured state if the episode has one, otherwise the commanded
         action, otherwise None.
     """
+    column = position_column(episode)
+    if column is None:
+        return None
+    values = episode.column(column).astype(np.float64)
+    return values.reshape(len(values), -1)
+
+
+def position_column(episode: episodes.Episode) -> str | None:
+    """Returns the name of the column that `positions` reads.
+
+    Args:
+        episode: The episode to look at.
+
+    Returns:
+        The state column if the episode has one, otherwise the action column,
+        otherwise None.
+    """
     for column in (episodes.STATE_COLUMN, episodes.ACTION_COLUMN):
         if episode.has_column(column):
-            values = episode.column(column).astype(np.float64)
-            return values.reshape(len(values), -1)
+            return column
     return None

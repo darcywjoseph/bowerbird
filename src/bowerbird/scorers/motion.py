@@ -44,6 +44,7 @@ class _Draft:
     fps: float
     segments: list[scores.Segment] = field(default_factory=list)
     change: npt.NDArray[Any] = field(default_factory=lambda: np.zeros(0))
+    change_dimension: npt.NDArray[Any] = field(default_factory=lambda: np.zeros(0, dtype=int))
     pinned: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
     chatter_clusters: int = 0
 
@@ -52,7 +53,7 @@ class MotionScorer:
     """Scores an episode by how direct and smooth its motion is."""
 
     name = "motion"
-    version = "2"
+    version = "3"
     requires: frozenset[scores.Requirement] = frozenset()
 
     def score(self, episodes: Iterable[episodes.Episode]) -> Iterator[scores.EpisodeScore]:
@@ -140,7 +141,8 @@ def _draft(
         idle = signals.speed(position, position_limits.span, fps) < IDLE_SPEED
         for start, stop in signals.runs(idle, max(2, round(_IDLE_SECONDS * fps))):
             reason = f"idle for {signals.seconds(stop - start, fps)}"
-            draft.segments.append(scores.Segment(start, stop, 0.0, reason))
+            column = signals.position_column(episode) or ""
+            draft.segments.append(scores.Segment(start, stop, 0.0, reason, column))
 
     action = _actions(episode)
     if action is None or action_limits.low is None or action_limits.high is None:
@@ -150,15 +152,18 @@ def _draft(
     normalised = (action - action_limits.low) / action_limits.span
 
     if arm and len(action) >= 3:
-        change = np.nanmax(np.abs(np.diff(normalised[:, arm], n=2, axis=0)), axis=1) * fps**2
+        per_dimension = np.abs(np.diff(normalised[:, arm], n=2, axis=0)) * fps**2
+        change = np.nanmax(per_dimension, axis=1)
         draft.change = np.concatenate((change[:1], change, change[-1:])).astype(np.float32)
+        fastest = np.asarray(arm)[np.nanargmax(per_dimension, axis=1)]
+        draft.change_dimension = np.concatenate((fastest[:1], fastest, fastest[-1:]))
     else:
         draft.change = np.zeros(len(action), dtype=np.float32)
 
     for dimension in grippers:
         for start, stop, toggles in _chatter(normalised[:, dimension], fps):
             reason = f"gripper toggled {toggles} times in {signals.seconds(stop - start, fps)}"
-            draft.segments.append(scores.Segment(start, stop, 0.0, reason))
+            draft.segments.append(scores.Segment(start, stop, 0.0, reason, _ACTION, (dimension,)))
             draft.chatter_clusters += 1
 
     at_limit = (normalised < _PINNED_MARGIN) | (normalised > 1 - _PINNED_MARGIN)
@@ -245,10 +250,12 @@ def _finish(
     idle_segments = [s for s in draft.segments if s.reason.startswith("idle")]
     idle_fraction = signals.coverage(idle_segments, length)
 
-    abrupt_segments = [
-        scores.Segment(start, stop, 0.0, "abrupt change in the commanded motion")
-        for start, stop in signals.runs(draft.change > threshold)
-    ]
+    abrupt_segments = []
+    for start, stop in signals.runs(draft.change > threshold):
+        peak = start + int(np.argmax(draft.change[start:stop]))
+        dimension = int(draft.change_dimension[peak])
+        reason = "abrupt change in the commanded motion"
+        abrupt_segments.append(scores.Segment(start, stop, 0.0, reason, _ACTION, (dimension,)))
     abrupt_fraction = signals.coverage(abrupt_segments, length)
 
     pinned_segments = []
@@ -261,7 +268,7 @@ def _finish(
                 f"action {label} held at the edge of its recorded range "
                 f"for {signals.seconds(stop - start, draft.fps)}"
             )
-            pinned_segments.append(scores.Segment(start, stop, 0.0, reason))
+            pinned_segments.append(scores.Segment(start, stop, 0.0, reason, _ACTION, (dimension,)))
     pinned_fraction = signals.coverage(pinned_segments, length)
 
     penalty = (

@@ -95,7 +95,7 @@ def _score(arguments: argparse.Namespace) -> None:
         force=arguments.force,
         log=lambda line: print(f"  {line}"),
     )
-    report = html_report.write(dataset, table, arguments.report)
+    report = html_report.write(dataset, table, arguments.report, check_video=not arguments.no_video)
     print(f"Scores: {dataset.scores_path}")
     print(f"Report: {report}")
     print()

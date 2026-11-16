@@ -32,6 +32,7 @@ _FROZEN_SECONDS = 0.5
 _KEYFRAME_FRAMES = 2
 _FROZEN_STILL_FRACTION = 0.8
 _FRAME_COUNT_TOLERANCE = 1
+_ACTION = episodes.ACTION_COLUMN
 
 
 @dataclass
@@ -43,6 +44,7 @@ class _Draft:
     fps: float
     segments: list[scores.Segment] = field(default_factory=list)
     tracking_error: npt.NDArray[Any] = field(default_factory=lambda: np.zeros(0))
+    tracking_dimension: npt.NDArray[Any] = field(default_factory=lambda: np.zeros(0, dtype=int))
 
 
 class _Correlation:
@@ -94,7 +96,7 @@ class HealthScorer:
               downloads the video files.
         """
         self.check_video = check_video
-        self.version = "1" if check_video else "1-novideo"
+        self.version = "2" if check_video else "2-novideo"
 
     def score(self, episodes: Iterable[episodes.Episode]) -> Iterator[scores.EpisodeScore]:
         """Scores each episode.
@@ -129,7 +131,9 @@ class HealthScorer:
                     f"robot was up to {worst:.0%} of its range away from its command "
                     f"for {signals.seconds(stop - start, draft.fps)}"
                 )
-                draft.segments.append(scores.Segment(start, stop, 0.0, reason))
+                peak = start + int(np.nanargmax(draft.tracking_error[start:stop]))
+                dims = (int(draft.tracking_dimension[peak]),)
+                draft.segments.append(scores.Segment(start, stop, 0.0, reason, _ACTION, dims))
             segments = sorted(draft.segments, key=lambda s: s.start_frame)
             score = 1.0 - signals.coverage(segments, draft.rows) if draft.rows else 0.0
             yield scores.EpisodeScore(draft.index, score, tuple(segments))
@@ -163,8 +167,11 @@ class HealthScorer:
             pair = _command_and_response(episode)
             if pair is not None:
                 action, next_state = pair
-                error = np.nanmax(np.abs(action - next_state) / position_limits.span, axis=1)
+                per_dimension = np.abs(action - next_state) / position_limits.span
+                error = np.nanmax(per_dimension, axis=1)
                 draft.tracking_error = np.concatenate((error, error[-1:])).astype(np.float32)
+                furthest = np.nanargmax(per_dimension, axis=1)
+                draft.tracking_dimension = np.concatenate((furthest, furthest[-1:]))
 
         if self.check_video:
             position = signals.positions(episode)
@@ -218,7 +225,8 @@ def _missing_values(episode: episodes.Episode) -> list[scores.Segment]:
         finite = np.isfinite(values.reshape(len(values), -1)).all(axis=1)
         bad: npt.NDArray[np.bool_] = np.asarray(~finite)
         for start, stop in signals.runs(bad):
-            segments.append(scores.Segment(start, stop, 0.0, f"missing values in {column}"))
+            reason = f"missing values in {column}"
+            segments.append(scores.Segment(start, stop, 0.0, reason, column))
     return segments
 
 

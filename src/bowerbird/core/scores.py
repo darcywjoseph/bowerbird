@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from importlib import metadata
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -23,6 +23,8 @@ _SEGMENT_TYPE = pa.struct(
         ("end_frame", pa.int64()),
         ("score", pa.float64()),
         ("reason", pa.string()),
+        ("column", pa.string()),
+        ("dims", pa.list_(pa.int64())),
     ]
 )
 _SCHEMA = pa.schema(
@@ -54,12 +56,38 @@ class Segment:
         end_frame: One past the last frame of the range.
         score: The range's quality, from 0 (worst) to 1 (best).
         reason: A plain-language cause, such as "stalled 4 s before grasp".
+        column: The per-frame column the problem shows up in, such as
+          "action", or an empty string if it is not about one column.
+        dims: The dimensions of that column the problem shows up in, or an
+          empty tuple if it is not about particular dimensions.
     """
 
     start_frame: int
     end_frame: int
     score: float
     reason: str
+    column: str = ""
+    dims: tuple[int, ...] = ()
+
+
+def _segment(stored: dict[str, Any]) -> Segment:
+    """Rebuilds a segment from its stored form.
+
+    Args:
+        stored: The segment's fields as read from a Parquet file. Files
+          written before a field existed lack it.
+
+    Returns:
+        The segment.
+    """
+    return Segment(
+        start_frame=stored["start_frame"],
+        end_frame=stored["end_frame"],
+        score=stored["score"],
+        reason=stored["reason"],
+        column=stored.get("column") or "",
+        dims=tuple(stored.get("dims") or ()),
+    )
 
 
 @dataclass(frozen=True)
@@ -330,7 +358,7 @@ class ScoreTable:
         file_metadata = arrow_table.schema.metadata or {}
         table = cls(file_metadata.get(_FINGERPRINT_KEY, b"").decode())
         for row in arrow_table.to_pylist():
-            segments = tuple(Segment(**segment) for segment in row["segments"] or ())
+            segments = tuple(_segment(segment) for segment in row["segments"] or ())
             score = EpisodeScore(row["episode_index"], row["score"], segments)
             table.add(row["scorer"], row["scorer_version"], [score])
         return table

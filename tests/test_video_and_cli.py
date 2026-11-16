@@ -1,9 +1,12 @@
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import bowerbird
 from bowerbird import cli
+from bowerbird.report import evidence
+from bowerbird.report import html as html_report
 from bowerbird.scorers import health
 from tests import conftest
 
@@ -85,3 +88,30 @@ def test_python_api_scores_and_selects(dataset_root: Path) -> None:
     assert worst[0].score <= worst[1].score
     keep = table.keep_episodes(0.6, scorers=["length"])
     assert keep == [1, 2, 4], "the three shortest episodes"
+
+
+def test_report_shows_stills_of_a_flagged_segment(tmp_path: Path) -> None:
+    root = conftest.write_dataset(tmp_path / "d", lengths=(30, 30, 30), frozen={1: (8, 24)})
+    dataset = bowerbird.load(root)
+    table = bowerbird.score(dataset, save=False)
+
+    page = html_report.render(dataset, table)
+
+    assert '<a href="#e1">1</a>' in page
+    assert '<section id="e1">' in page
+    assert page.count("data:image/jpeg;base64,") == 6
+    assert "frozen for" in page
+    assert "data:image" not in html_report.render(dataset, table, check_video=False)
+
+
+def test_plot_draws_the_command_beside_what_was_measured() -> None:
+    wave = np.sin(np.arange(100)[:, None] / 10 + np.array([0.0, 1.0]))
+    episode = conftest.make_episode(0, wave, wave + 0.1, action_names=("elbow", "wrist"))
+    segment = bowerbird.Segment(40, 60, 0.0, "abrupt change", "action", (1,))
+    summary = bowerbird.EpisodeSummary(0, 0.5, {"motion": 0.5}, (("motion", segment),))
+
+    section = evidence.render(episode, summary, check_video=False)
+
+    assert section.count("<polyline") == 2
+    assert "wrist, commanded" in section and "wrist, measured" in section
+    assert "frames 40 to 60 (4.0 to 6.0 s)" in section
