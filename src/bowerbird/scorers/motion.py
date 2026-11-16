@@ -12,9 +12,12 @@ Some robots are commanded by how far to move each step instead, and for
 those a one-frame jump or a command held at full size is ordinary. The two
 checks are skipped when the states show that commands are of that kind.
 
-There is no general smoothness check. An earlier one flagged ordinary quick
-movements, and a smoothness measure should come from a published method that
-has been reproduced.
+Two more checks compare an episode with the others on its task: how smooth
+its motion is, by the spectral arc length of its speed, and how far the robot
+travelled. Unlike the checks above they lower the score a little for any
+episode worse than the task's median, so that the score ranks episodes and
+does not only mark the faulty ones. A task needs enough episodes for its
+median to mean something, so small tasks are not compared.
 """
 
 from collections.abc import Iterable, Iterator
@@ -26,7 +29,7 @@ import numpy.typing as npt
 
 from bowerbird import errors
 from bowerbird.core import episodes, scores
-from bowerbird.scorers import signals, tracking
+from bowerbird.scorers import signals, smoothness, tracking
 
 # Slower than this fraction of the range per second counts as not moving.
 IDLE_SPEED = 0.02
@@ -49,6 +52,15 @@ _PINNED_MARGIN = 0.01
 _PINNED_SECONDS = 1.0
 # A dimension that sits at its limit this often is resting there, not pinned.
 _PINNED_RESTING_FRACTION = 0.1
+# An episode this many robust standard deviations worse than its task's median
+# takes the full penalty for a measure, and is reported from the lower level.
+_RELATIVE_FULL = 3.0
+_RELATIVE_REPORT = 2.0
+_RELATIVE_PENALTY = 0.25
+# The least spread to assume within a task: in units of spectral arc length for
+# smoothness, and as a fraction of the task's median for distance.
+_SMOOTHNESS_SPREAD = 0.2
+_DISTANCE_SPREAD = 0.1
 _ACTION = episodes.ACTION_COLUMN
 
 
@@ -64,6 +76,9 @@ class _Draft:
     pinned: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
     chatter_clusters: int = 0
     idle_frames: float = 0.0
+    column: str = ""
+    smoothness: float | None = None
+    distance: float | None = None
     tracking_error: npt.NDArray[Any] = field(default_factory=lambda: np.zeros(0))
     tracking_dimension: npt.NDArray[Any] = field(default_factory=lambda: np.zeros(0, dtype=int))
 
@@ -72,7 +87,7 @@ class MotionScorer:
     """Scores an episode by how direct and smooth its motion is."""
 
     name = "motion"
-    version = "7"
+    version = "8"
     requires: frozenset[scores.Requirement] = frozenset()
 
     def score(self, episodes: Iterable[episodes.Episode]) -> Iterator[scores.EpisodeScore]:
@@ -122,10 +137,11 @@ class MotionScorer:
             )
             for group in set(groups)
         }
-        for draft, episode, group, tracked in zip(
-            drafts, episode_list, groups, off_command, strict=True
+        relative = _relative(drafts, groups)
+        for draft, episode, group, tracked, compared in zip(
+            drafts, episode_list, groups, off_command, relative, strict=True
         ):
-            yield _finish(draft, resting[group], episode.names(_ACTION), tracked)
+            yield _finish(draft, resting[group], episode.names(_ACTION), tracked, compared)
 
 
 def _actions(episode: episodes.Episode) -> npt.NDArray[Any] | None:
@@ -171,6 +187,13 @@ def _draft(
     if position is not None:
         idle = signals.speed(position, position_limits.span, fps) < IDLE_SPEED
         column = signals.position_column(episode) or ""
+        draft.column = column
+        grippers = signals.gripper_dimensions(episode.names(column), position.shape[1])
+        arm = [i for i in range(position.shape[1]) if i not in grippers]
+        if arm and len(position) > 1:
+            arm_speed = smoothness.arm_speed(position, position_limits.span, arm, fps)
+            draft.smoothness = smoothness.spectral_arc_length(arm_speed, fps)
+            draft.distance = float(arm_speed.sum() / fps)
         for start, stop in signals.runs(idle, max(2, round(_IDLE_SECONDS * fps))):
             reason, weight = _idle_kind(start, stop, len(idle), fps)
             draft.segments.append(scores.Segment(start, stop, 0.0, reason, column))
@@ -324,11 +347,58 @@ def _resting_dimensions(drafts: list[_Draft]) -> set[int]:
     }
 
 
+def _relative(
+    drafts: list[_Draft], groups: list[tuple[str, ...] | None]
+) -> list[tuple[float, list[scores.Segment]]]:
+    """Compares each episode's smoothness and distance with its task's.
+
+    Args:
+        drafts: Every episode's draft.
+        groups: Each episode's task, or None for a task too small to compare.
+
+    Returns:
+        For each episode, the penalty to apply and the segments that explain
+        it. An episode of a small task gets neither.
+    """
+    results: list[tuple[float, list[scores.Segment]]] = [(0.0, []) for _ in drafts]
+    for group in set(groups):
+        if group is None:
+            continue
+        members = [i for i, other in enumerate(groups) if other == group]
+        distances = [drafts[i].distance for i in members]
+        known = [distance for distance in distances if distance is not None]
+        median = float(np.median(known)) if known else 0.0
+        unsmooth = smoothness.shortfall([drafts[i].smoothness for i in members], _SMOOTHNESS_SPREAD)
+        # A longer way round is worse, so distances are compared negated.
+        far = smoothness.shortfall(
+            [None if d is None else -d for d in distances], _DISTANCE_SPREAD * median
+        )
+        for i, rough, long_way, distance in zip(members, unsmooth, far, distances, strict=True):
+            draft = drafts[i]
+            whole = (0, max(draft.length, 1))
+            segments = []
+            if rough >= _RELATIVE_REPORT:
+                reason = "motion is much less smooth than is normal for its task"
+                segments.append(scores.Segment(*whole, 0.0, reason, draft.column))
+            if long_way >= _RELATIVE_REPORT and distance is not None and median > 0:
+                reason = (
+                    f"robot travelled {distance / median:.1f}x the median distance for its task"
+                )
+                segments.append(scores.Segment(*whole, 0.0, reason, draft.column))
+            penalty = sum(
+                _RELATIVE_PENALTY * min(shortfall, _RELATIVE_FULL) / _RELATIVE_FULL
+                for shortfall in (rough, long_way)
+            )
+            results[i] = (penalty, segments)
+    return results
+
+
 def _finish(
     draft: _Draft,
     resting: set[int],
     action_names: tuple[str, ...],
     off_command: list[scores.Segment],
+    compared: tuple[float, list[scores.Segment]],
 ) -> scores.EpisodeScore:
     """Applies the dataset-wide facts and turns a draft into a score.
 
@@ -337,6 +407,8 @@ def _finish(
         resting: Action dimensions to ignore when looking for pinned commands.
         action_names: The action's dimension names, possibly empty.
         off_command: The stretches where the robot was far from its command.
+        compared: The penalty and segments from comparing the episode with
+          its task, from `_relative`.
 
     Returns:
         The episode's score and the segments that explain it.
@@ -363,9 +435,11 @@ def _finish(
         + _CHATTER_PENALTY * draft.chatter_clusters
         + pinned_fraction
         + signals.coverage(off_command, length)
+        + compared[0]
     )
     segments = sorted(
-        [*draft.segments, *pinned_segments, *off_command], key=lambda s: s.start_frame
+        [*draft.segments, *pinned_segments, *off_command, *compared[1]],
+        key=lambda s: s.start_frame,
     )
     return scores.EpisodeScore(
         draft.index, float(np.clip(1.0 - penalty, 0.0, 1.0)), tuple(segments)
