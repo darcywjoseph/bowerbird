@@ -49,6 +49,13 @@ def test_score_then_show(
     assert "http://" not in page and "https://" not in page, "the report must open offline"
     assert "Lowest-scoring episodes" in page
 
+    scorers = "health,length,motion,random"
+    assert (
+        cli.main(["score", str(dataset_root), "--scorers", scorers, "--report", str(report)]) == 0
+    )
+    assert "random" in capsys.readouterr().out, "the control is scored and listed in the terminal"
+    assert "random" not in report.read_text(), "but it has no place in the report"
+
     assert cli.main(["score", str(dataset_root), "--report", str(report)]) == 0
     assert capsys.readouterr().out.count("already scored") == 3
 

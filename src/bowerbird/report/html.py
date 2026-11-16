@@ -94,8 +94,8 @@ def render(dataset: lerobot.Dataset, table: scores.ScoreTable, worst: int = 50) 
     flagged = sum(1 for summary in summaries if summary.segments)
     cameras = len(dataset.cameras)
     name = html.escape(dataset.name)
-    versions = ", ".join(f"{scorer} {table.version(scorer)}" for scorer in table.scorers)
-    overall = " and ".join(n for n in table.scorers if n not in scores.BASELINES) or "all scorers"
+    versions = ", ".join(f"{scorer} {table.version(scorer)}" for scorer in _shown(table))
+    overall = " and ".join(n for n in _shown(table) if n not in scores.BASELINES) or "all scorers"
     return f"""<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
@@ -121,13 +121,25 @@ in ten equal score ranges, low to high.</p>
 {_problems(summaries)}
 
 <h2>Lowest-scoring episodes</h2>
-<p class=note>Overall is the mean of {html.escape(overall)}. The length and random scorers are
-baselines and are left out of it. Each bar is the episode from first frame to last, with flagged
+<p class=note>Overall is the mean of {html.escape(overall)}. The length scorer is a baseline for
+comparison and is left out of it. Each bar is the episode from first frame to last, with flagged
 segments filled in.</p>
 {_episodes(table.worst(worst), lengths, table, len(summaries))}
 </main>
 </html>
 """
+
+
+def _shown(table: scores.ScoreTable) -> list[str]:
+    """Lists the scorers the report covers.
+
+    The random control is left out: it exists for benchmark comparisons and
+    says nothing about the dataset.
+
+    Args:
+        table: The dataset's scores.
+    """
+    return [scorer for scorer in table.scorers if scorer != "random"]
 
 
 def _duration(seconds: float) -> str:
@@ -153,7 +165,7 @@ def _score_table(table: scores.ScoreTable) -> str:
         The table's HTML.
     """
     rows = []
-    for scorer in table.scorers:
+    for scorer in _shown(table):
         values = np.array([score.score for score in table.get(scorer).values()])
         label = html.escape(scorer) + (" (baseline)" if scorer in scores.BASELINES else "")
         rows.append(
@@ -279,17 +291,17 @@ def _episodes(
     """
     lanes = [
         scorer
-        for scorer in table.scorers
+        for scorer in _shown(table)
         if any(score.segments for score in table.get(scorer).values())
     ]
-    header = "".join(f"<th class=n>{html.escape(scorer)}</th>" for scorer in table.scorers)
+    header = "".join(f"<th class=n>{html.escape(scorer)}</th>" for scorer in _shown(table))
     rows = []
     for summary in worst:
         cells = "".join(
             f"<td class=n>{summary.scores[scorer]:.2f}</td>"
             if scorer in summary.scores
             else "<td></td>"
-            for scorer in table.scorers
+            for scorer in _shown(table)
         )
         reasons = list(summary.reasons[:_REASONS_SHOWN])
         if len(summary.reasons) > _REASONS_SHOWN:
