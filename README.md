@@ -44,6 +44,30 @@ keep = scores.keep_episodes(fraction=0.8)  # pass to LeRobotDataset(..., episode
 
 These scores are rule-based and have not yet been tested against trained-model results.
 
+## Benchmark (work in progress)
+
+The benchmark asks whether training on the episodes a scorer keeps gives a better policy.
+It trains a Diffusion Policy through LeRobot and tests it in the robosuite simulator on robomimic tasks.
+It needs Python 3.12 or newer, and a GPU for anything beyond a smoke test. No results are published yet.
+
+```bash
+pip install "bowerbird[bench] @ git+https://github.com/darcywjoseph/bowerbird"
+
+# Download a task and convert it to a LeRobot dataset.
+bowerbird bench prepare lift mixed data
+
+# Keep the shortest half, train on it, test the policy, write result.json.
+bowerbird bench run data/lift_mixed runs/length --rule length --fraction 0.5 --steps 20000
+
+# Damage a fifth of the episodes in known ways, then see what the scorers find.
+bowerbird bench damage data/lift_mixed data/lift_damaged
+bowerbird bench detect data/lift_damaged
+
+# Run every condition for one task across five seeds, then write it up.
+bowerbird bench round bench square --steps 100000
+bowerbird bench report bench square
+```
+
 ## Development
 
 ```bash

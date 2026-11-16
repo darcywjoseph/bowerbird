@@ -28,6 +28,19 @@ jobs:
       - run: uv run mypy
       - run: uv run pytest
 
+  # The benchmark needs the simulator and training libraries, which the other
+  # jobs do not install. Its tests train nothing and need no GPU.
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked --extra bench
+      - run: uv run pytest tests/test_bench_robomimic.py tests/test_bench_runs.py tests/test_bench_faults.py tests/test_bench_statistics.py
+
   # The plan's target: from install to a quality report in under five minutes,
   # on a machine with no GPU, with one command. The job's time limit is the test.
   install-to-report:
