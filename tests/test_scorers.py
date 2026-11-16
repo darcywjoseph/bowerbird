@@ -87,10 +87,27 @@ def test_motion_flags_idling_jumps_and_gripper_chatter() -> None:
     reasons = {index: " | ".join(s.reason for s in scores[index].segments) for index in (6, 7, 8)}
     assert "idle for 3.0 s" in reasons[6]
     assert scores[6].score < 0.8
-    assert "abrupt change" in reasons[7]
-    assert any(s.start_frame <= 50 < s.end_frame for s in scores[7].segments)
+    assert "action shoulder jumped 50% of its range and back in one frame" in reasons[7]
+    assert [s.start_frame for s in scores[7].segments] == [50]
     assert "gripper toggled" in reasons[8]
     assert scores[8].score < 1.0
+
+
+def test_motion_does_not_mistake_quick_movement_for_a_glitch() -> None:
+    steady = np.linspace(0.0, 1.0, LENGTH)
+    tap = steady.copy()
+    tap[50:] = steady[50] - (steady[50:] - steady[50]) * 8  # a sharp change of direction
+    step = np.where(np.arange(LENGTH) < 50, 0.2, 0.8)  # a move to a new target in one frame
+    stop = np.minimum(steady * 3, 1.0)  # fast, then a sudden halt
+    episodes = [
+        conftest.make_episode(index, None, np.column_stack((command, steady)))
+        for index, command in enumerate((tap, step, stop))
+    ]
+
+    scores = list(motion.MotionScorer().score(episodes))
+
+    for score in scores:
+        assert not [s for s in score.segments if "jumped" in s.reason], score.segments
 
 
 def test_health_flags_broken_recordings() -> None:

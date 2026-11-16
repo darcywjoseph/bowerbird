@@ -22,7 +22,7 @@ bowerbird show lerobot/pusht --worst 20
 | Scorer | What it looks for |
 | --- | --- |
 | `health` | Broken recordings: missing values, dropped frames, a robot that stops following its commands, frozen or unreadable cameras |
-| `motion` | Idle stretches, abrupt commands, a gripper opening and closing repeatedly, commands held at their limits |
+| `motion` | Idle stretches, a command that jumps away and straight back, a gripper opening and closing repeatedly, commands held at the edge of their range |
 | `length` | Episode length next to others on the same task. A baseline to compare the others with |
 
 A fourth, `random`, is a control: add it with `--scorers health,length,motion,random`.

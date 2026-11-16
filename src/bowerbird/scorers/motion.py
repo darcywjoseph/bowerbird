@@ -1,9 +1,13 @@
 """Scores how cleanly the operator moved, from the numbers alone.
 
-The checks follow the motion rules used by RINSE and DQAF: time spent idle,
-abrupt changes in the commanded motion, a gripper that opens and closes
-repeatedly, and commands held at their limits. Thresholds are relative to
-the dataset, so a score says how an episode compares with its neighbours.
+The checks are in the spirit of the motion rules used by RINSE and DQAF: time
+spent idle, a command that jumps away and straight back, a gripper that opens
+and closes repeatedly, and commands held at the edge of their range. Sizes
+are measured against each signal's range over the whole dataset.
+
+There is no general smoothness check. An earlier one flagged ordinary quick
+movements, and a smoothness measure should come from a published method that
+has been reproduced.
 """
 
 from collections.abc import Iterable, Iterator
@@ -20,9 +24,12 @@ from bowerbird.scorers import signals
 # Slower than this fraction of the range per second counts as not moving.
 IDLE_SPEED = 0.02
 _IDLE_SECONDS = 0.5
-_ABRUPT_SIGMAS = 12.0
-_ABRUPT_FLOOR = 1e-6
-_ABRUPT_WEIGHT = 5.0
+# A command must leave its neighbours by this fraction of its range to be a spike.
+_SPIKE_SIZE = 0.02
+# Everything around a spike must move less than this fraction of the spike's
+# size. That is what separates a glitch from a quick tap or a change of direction.
+_SPIKE_QUIET = 0.5
+_SPIKE_PENALTY = 0.1
 _GRIPPER_CLOSED = 0.3
 _GRIPPER_OPEN = 0.7
 _CHATTER_GAP_SECONDS = 1.0
@@ -37,14 +44,13 @@ _ACTION = episodes.ACTION_COLUMN
 
 @dataclass
 class _Draft:
-    """What is known about one episode before dataset-wide thresholds exist."""
+    """What is known about one episode before dataset-wide facts are applied."""
 
     index: int
     length: int
     fps: float
     segments: list[scores.Segment] = field(default_factory=list)
-    change: npt.NDArray[Any] = field(default_factory=lambda: np.zeros(0))
-    change_dimension: npt.NDArray[Any] = field(default_factory=lambda: np.zeros(0, dtype=int))
+    spikes: int = 0
     pinned: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
     chatter_clusters: int = 0
 
@@ -53,7 +59,7 @@ class MotionScorer:
     """Scores an episode by how direct and smooth its motion is."""
 
     name = "motion"
-    version = "3"
+    version = "4"
     requires: frozenset[scores.Requirement] = frozenset()
 
     def score(self, episodes: Iterable[episodes.Episode]) -> Iterator[scores.EpisodeScore]:
@@ -84,12 +90,9 @@ class MotionScorer:
                 action_limits.update(action)
 
         drafts = [_draft(episode, position_limits, action_limits) for episode in episode_list]
-        threshold = signals.outlier_threshold(
-            [draft.change for draft in drafts], _ABRUPT_SIGMAS, _ABRUPT_FLOOR
-        )
         resting = _resting_dimensions(drafts)
         for draft, episode in zip(drafts, episode_list, strict=True):
-            yield _finish(draft, threshold, resting, episode.names(_ACTION))
+            yield _finish(draft, resting, episode.names(_ACTION))
 
 
 def _actions(episode: episodes.Episode) -> npt.NDArray[Any] | None:
@@ -151,14 +154,14 @@ def _draft(
     arm = [i for i in range(action.shape[1]) if i not in grippers]
     normalised = (action - action_limits.low) / action_limits.span
 
-    if arm and len(action) >= 3:
-        per_dimension = np.abs(np.diff(normalised[:, arm], n=2, axis=0)) * fps**2
-        change = np.nanmax(per_dimension, axis=1)
-        draft.change = np.concatenate((change[:1], change, change[-1:])).astype(np.float32)
-        fastest = np.asarray(arm)[np.nanargmax(per_dimension, axis=1)]
-        draft.change_dimension = np.concatenate((fastest[:1], fastest, fastest[-1:]))
-    else:
-        draft.change = np.zeros(len(action), dtype=np.float32)
+    names = episode.names(episodes.ACTION_COLUMN)
+    for dimension in arm:
+        for frame, size in _spikes(normalised[:, dimension]):
+            label = names[dimension] if dimension < len(names) else f"#{dimension}"
+            reason = f"action {label} jumped {size:.0%} of its range and back in one frame"
+            segment = scores.Segment(frame, frame + 1, 0.0, reason, _ACTION, (dimension,))
+            draft.segments.append(segment)
+            draft.spikes += 1
 
     for dimension in grippers:
         for start, stop, toggles in _chatter(normalised[:, dimension], fps):
@@ -172,6 +175,35 @@ def _draft(
         if pinned:
             draft.pinned[dimension] = pinned
     return draft
+
+
+def _spikes(command: npt.NDArray[Any]) -> list[tuple[int, float]]:
+    """Finds frames where a command jumps away from its neighbours and back.
+
+    A spike is one frame that sits far from the frames either side of it,
+    while those two frames agree with each other and the command is nearly
+    still just before and just after. A quick tap or a change of direction
+    fails the last condition, because the command is moving on at least one
+    side.
+
+    Args:
+        command: One action dimension, scaled so its dataset range is 0 to 1.
+
+    Returns:
+        Each spike's frame and its size as a fraction of the range.
+    """
+    if len(command) < 5:
+        return []
+    centre = command[2:-2]
+    size = np.abs(centre - (command[1:-3] + command[3:-1]) / 2)
+    quiet = _SPIKE_QUIET * size
+    is_spike = (
+        (size > _SPIKE_SIZE)
+        & (np.abs(command[3:-1] - command[1:-3]) < quiet)
+        & (np.abs(command[1:-3] - command[:-4]) < quiet)
+        & (np.abs(command[4:] - command[3:-1]) < quiet)
+    )
+    return [(int(i) + 2, float(size[i])) for i in np.flatnonzero(is_spike)]
 
 
 def _chatter(gripper: npt.NDArray[Any], fps: float) -> list[tuple[int, int, int]]:
@@ -232,14 +264,11 @@ def _resting_dimensions(drafts: list[_Draft]) -> set[int]:
     }
 
 
-def _finish(
-    draft: _Draft, threshold: float, resting: set[int], action_names: tuple[str, ...]
-) -> scores.EpisodeScore:
-    """Applies the dataset-wide thresholds and turns a draft into a score.
+def _finish(draft: _Draft, resting: set[int], action_names: tuple[str, ...]) -> scores.EpisodeScore:
+    """Applies the dataset-wide facts and turns a draft into a score.
 
     Args:
         draft: The episode's draft.
-        threshold: The level of change in the command that counts as abrupt.
         resting: Action dimensions to ignore when looking for pinned commands.
         action_names: The action's dimension names, possibly empty.
 
@@ -249,14 +278,6 @@ def _finish(
     length = max(draft.length, 1)
     idle_segments = [s for s in draft.segments if s.reason.startswith("idle")]
     idle_fraction = signals.coverage(idle_segments, length)
-
-    abrupt_segments = []
-    for start, stop in signals.runs(draft.change > threshold):
-        peak = start + int(np.argmax(draft.change[start:stop]))
-        dimension = int(draft.change_dimension[peak])
-        reason = "abrupt change in the commanded motion"
-        abrupt_segments.append(scores.Segment(start, stop, 0.0, reason, _ACTION, (dimension,)))
-    abrupt_fraction = signals.coverage(abrupt_segments, length)
 
     pinned_segments = []
     for dimension, pinned in draft.pinned.items():
@@ -273,13 +294,11 @@ def _finish(
 
     penalty = (
         idle_fraction
-        + _ABRUPT_WEIGHT * abrupt_fraction
+        + _SPIKE_PENALTY * draft.spikes
         + _CHATTER_PENALTY * draft.chatter_clusters
         + pinned_fraction
     )
-    segments = sorted(
-        [*draft.segments, *abrupt_segments, *pinned_segments], key=lambda s: s.start_frame
-    )
+    segments = sorted([*draft.segments, *pinned_segments], key=lambda s: s.start_frame)
     return scores.EpisodeScore(
         draft.index, float(np.clip(1.0 - penalty, 0.0, 1.0)), tuple(segments)
     )
