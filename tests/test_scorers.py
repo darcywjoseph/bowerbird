@@ -2,6 +2,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
+import bowerbird
 from bowerbird.scorers import baselines, health, motion, signals
 from tests import conftest
 
@@ -141,24 +142,27 @@ def test_health_flags_broken_recordings() -> None:
     for index in range(6):
         assert scores[index].score == 1.0, scores[index].segments
     reasons = {index: " | ".join(s.reason for s in scores[index].segments) for index in scores}
-    assert "away from its command" in reasons[6]
+    assert scores[6].score == 1.0, "a robot off its command is not a broken recording"
     assert "missing values in action" in reasons[7]
     assert scores[7].segments[0].start_frame == 10
     assert "5 frames dropped" in reasons[8]
     assert "has 100 frames, but the metadata says 120" in reasons[9]
     assert scores[9].score == 0.0
-    assert 0.0 < scores[6].score < 1.0
 
 
-def test_health_ignores_tracking_when_actions_are_not_targets() -> None:
+def _off_command(score: bowerbird.EpisodeScore) -> list[bowerbird.Segment]:
+    return [segment for segment in score.segments if "away from its command" in segment.reason]
+
+
+def test_tracking_is_skipped_when_actions_are_not_targets() -> None:
     episodes = [
         conftest.make_episode(index, np.cumsum(_smooth(index), axis=0), np.cos(_smooth(index) * 9))
         for index in range(6)
     ]
 
-    scores = list(health.HealthScorer(check_video=False).score(episodes))
+    scores = list(motion.MotionScorer().score(episodes))
 
-    assert all(score.score == 1.0 for score in scores)
+    assert not any(_off_command(score) for score in scores)
 
 
 def test_idle_at_the_edges_counts_half_as_much_as_a_pause() -> None:
@@ -203,11 +207,11 @@ def test_tracking_allows_for_the_robots_response_delay() -> None:
     state[40:60] = state[40]
     stuck = conftest.make_episode(6, state, action)
 
-    scores = list(health.HealthScorer(check_video=False).score([*clean, stuck]))
+    scores = list(motion.MotionScorer().score([*clean, stuck]))
 
-    assert all(score.score == 1.0 for score in scores[:6]), "a steady delay and offset are normal"
-    (segment,) = scores[6].segments
-    assert "away from its command" in segment.reason
+    assert not any(_off_command(score) for score in scores[:6]), "a steady delay is normal"
+    (segment,) = _off_command(scores[6])
+    assert scores[6].score < 1.0
     assert 40 <= segment.start_frame <= 50 and 55 <= segment.end_frame <= 62
 
 
@@ -221,9 +225,9 @@ def test_tracking_ignores_a_gripper_that_stops_short_of_its_command() -> None:
         state = np.column_stack((np.concatenate((arm[:1], arm[:-1])), command * 0.4))
         episodes.append(conftest.make_episode(index, state, action, action_names=names))
 
-    scores = list(health.HealthScorer(check_video=False).score(episodes))
+    scores = list(motion.MotionScorer().score(episodes))
 
-    assert all(score.score == 1.0 for score in scores), scores[0].segments
+    assert not any(_off_command(score) for score in scores), scores[0].segments
 
 
 def test_small_tasks_are_pooled_and_large_ones_stand_alone() -> None:

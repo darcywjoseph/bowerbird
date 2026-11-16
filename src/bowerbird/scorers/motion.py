@@ -2,7 +2,8 @@
 
 The checks are in the spirit of the motion rules used by RINSE and DQAF: time
 spent idle, a command that jumps away and straight back, a gripper that opens
-and closes repeatedly, and commands held at the edge of their range. Sizes
+and closes repeatedly, commands held at the edge of their range, and a robot
+that is far from where it was told to be. Sizes
 are measured against each signal's range over the whole dataset. What counts
 as a joint's resting position is judged within each task.
 
@@ -20,7 +21,7 @@ import numpy.typing as npt
 
 from bowerbird import errors
 from bowerbird.core import episodes, scores
-from bowerbird.scorers import signals
+from bowerbird.scorers import signals, tracking
 
 # Slower than this fraction of the range per second counts as not moving.
 IDLE_SPEED = 0.02
@@ -58,13 +59,15 @@ class _Draft:
     pinned: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
     chatter_clusters: int = 0
     idle_frames: float = 0.0
+    tracking_error: npt.NDArray[Any] = field(default_factory=lambda: np.zeros(0))
+    tracking_dimension: npt.NDArray[Any] = field(default_factory=lambda: np.zeros(0, dtype=int))
 
 
 class MotionScorer:
     """Scores an episode by how direct and smooth its motion is."""
 
     name = "motion"
-    version = "5"
+    version = "6"
     requires: frozenset[scores.Requirement] = frozenset()
 
     def score(self, episodes: Iterable[episodes.Episode]) -> Iterator[scores.EpisodeScore]:
@@ -94,16 +97,26 @@ class MotionScorer:
             if action is not None:
                 action_limits.update(action)
 
-        drafts = [_draft(episode, position_limits, action_limits) for episode in episode_list]
+        lag = tracking.find_lag(episode_list)
+        drafts = [_draft(episode, position_limits, action_limits, lag) for episode in episode_list]
         groups = signals.task_groups(episode_list)
+        fps = episode_list[0].fps if episode_list else 1.0
+        off_command = tracking.segments(
+            [draft.tracking_error for draft in drafts],
+            [draft.tracking_dimension for draft in drafts],
+            groups,
+            fps,
+        )
         resting = {
             group: _resting_dimensions(
                 [draft for draft, other in zip(drafts, groups, strict=True) if other == group]
             )
             for group in set(groups)
         }
-        for draft, episode, group in zip(drafts, episode_list, groups, strict=True):
-            yield _finish(draft, resting[group], episode.names(_ACTION))
+        for draft, episode, group, tracked in zip(
+            drafts, episode_list, groups, off_command, strict=True
+        ):
+            yield _finish(draft, resting[group], episode.names(_ACTION), tracked)
 
 
 def _actions(episode: episodes.Episode) -> npt.NDArray[Any] | None:
@@ -122,7 +135,10 @@ def _actions(episode: episodes.Episode) -> npt.NDArray[Any] | None:
 
 
 def _draft(
-    episode: episodes.Episode, position_limits: signals.Limits, action_limits: signals.Limits
+    episode: episodes.Episode,
+    position_limits: signals.Limits,
+    action_limits: signals.Limits,
+    lag: int | None,
 ) -> _Draft:
     """Runs the checks that need only dataset-wide ranges.
 
@@ -130,6 +146,8 @@ def _draft(
         episode: The episode to check.
         position_limits: The range of the position signal over the dataset.
         action_limits: The range of the actions over the dataset.
+        lag: How many frames the robot takes to respond to a command, or None
+          if states do not follow actions in this dataset.
 
     Returns:
         The episode's idle and gripper segments, and the raw material for the
@@ -145,6 +163,12 @@ def _draft(
             reason, weight = _idle_kind(start, stop, len(idle), fps)
             draft.segments.append(scores.Segment(start, stop, 0.0, reason, column))
             draft.idle_frames += weight * (stop - start)
+
+    pair = tracking.command_and_response(episode) if lag is not None else None
+    if lag is not None and pair is not None and len(pair[0]) > lag + 1:
+        draft.tracking_error, draft.tracking_dimension = tracking.error(
+            *pair, lag, position_limits.span, episode.names(_ACTION)
+        )
 
     action = _actions(episode)
     if action is None or action_limits.low is None or action_limits.high is None:
@@ -286,13 +310,19 @@ def _resting_dimensions(drafts: list[_Draft]) -> set[int]:
     }
 
 
-def _finish(draft: _Draft, resting: set[int], action_names: tuple[str, ...]) -> scores.EpisodeScore:
+def _finish(
+    draft: _Draft,
+    resting: set[int],
+    action_names: tuple[str, ...],
+    off_command: list[scores.Segment],
+) -> scores.EpisodeScore:
     """Applies the dataset-wide facts and turns a draft into a score.
 
     Args:
         draft: The episode's draft.
         resting: Action dimensions to ignore when looking for pinned commands.
         action_names: The action's dimension names, possibly empty.
+        off_command: The stretches where the robot was far from its command.
 
     Returns:
         The episode's score and the segments that explain it.
@@ -318,8 +348,11 @@ def _finish(draft: _Draft, resting: set[int], action_names: tuple[str, ...]) -> 
         + _SPIKE_PENALTY * draft.spikes
         + _CHATTER_PENALTY * draft.chatter_clusters
         + pinned_fraction
+        + signals.coverage(off_command, length)
     )
-    segments = sorted([*draft.segments, *pinned_segments], key=lambda s: s.start_frame)
+    segments = sorted(
+        [*draft.segments, *pinned_segments, *off_command], key=lambda s: s.start_frame
+    )
     return scores.EpisodeScore(
         draft.index, float(np.clip(1.0 - penalty, 0.0, 1.0)), tuple(segments)
     )
