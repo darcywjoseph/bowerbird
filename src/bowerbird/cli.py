@@ -77,6 +77,13 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("task", help="lift, can or square")
     prepare.add_argument("data_set", metavar="set", help="mixed or skilled")
     prepare.add_argument("folder", help="where to keep the download and the dataset")
+    damage = steps.add_parser("damage", help="write a copy of a dataset with known faults")
+    damage.add_argument("dataset", help="a dataset folder made by `bowerbird bench prepare`")
+    damage.add_argument("output", help="the folder for the damaged copy")
+    damage.add_argument("--share", type=float, default=0.2, help="the share of episodes to damage")
+    damage.add_argument("--seed", type=int, default=0, help="chooses the episodes and the faults")
+    detect = steps.add_parser("detect", help="measure how many known faults the scorers find")
+    detect.add_argument("dataset", help="a dataset folder made by `bowerbird bench damage`")
     run = steps.add_parser("run", help="curate by one rule, train a policy and test it")
     run.add_argument("dataset", help="a dataset folder made by `bowerbird bench prepare`")
     run.add_argument("output", help="the folder for this run's checkpoints and result")
@@ -153,7 +160,7 @@ def _bench(arguments: argparse.Namespace) -> None:
         ScorerError: The benchmark's extra dependencies are not installed.
     """
     try:
-        from bowerbird.bench import robomimic, runs
+        from bowerbird.bench import detection, faults, robomimic, runs
     except ImportError as error:
         raise errors.ScorerError(
             f"The benchmark needs extra packages ({error.name} is missing). "
@@ -166,6 +173,27 @@ def _bench(arguments: argparse.Namespace) -> None:
         root = folder / f"{arguments.task}_{arguments.data_set}"
         robomimic.convert(source, root, arguments.task)
         print(f"Dataset: {root}")
+        return
+    if arguments.step == "damage":
+        made = faults.damage(
+            pathlib.Path(arguments.dataset),
+            pathlib.Path(arguments.output),
+            share=arguments.share,
+            seed=arguments.seed,
+        )
+        print(f"Damaged {len(made)} episodes. Dataset: {arguments.output}")
+        return
+    if arguments.step == "detect":
+        found = detection.measure(pathlib.Path(arguments.dataset))
+        print(f"{'fault':16} {'episodes':>8} {'named':>6} {'flagged':>8} {'separation':>11}")
+        for row in found.rows:
+            print(
+                f"{row.kind:16} {row.episodes:>8} {row.named:>6.0%} {row.flagged:>8.0%} "
+                f"{row.separation:>11.2f}"
+            )
+        print(f"All damaged episodes: separation {found.separation:.2f}")
+        for name, share in found.false_alarms.items():
+            print(f"{name} flags {share:.0%} of the {found.undamaged} undamaged episodes")
         return
     runs.run(
         pathlib.Path(arguments.dataset),

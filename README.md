@@ -21,7 +21,7 @@ bowerbird show lerobot/pusht --worst 20
 
 | Scorer | What it looks for |
 | --- | --- |
-| `health` | Broken recordings: missing values, dropped frames, frozen or unreadable cameras, episodes far shorter than normal for their task |
+| `health` | Broken recordings: missing values, dropped frames, a robot that jumps in one frame, frozen or unreadable cameras, episodes far shorter than normal for their task |
 | `motion` | Idle stretches, a command that jumps away and straight back, a gripper opening and closing repeatedly, commands held at the edge of their range, a robot far from where it was told to be. Also how smooth the motion is and how far the robot travelled, compared with other episodes of the same task |
 | `length` | Episode length next to others on the same task. A baseline to compare the others with |
 

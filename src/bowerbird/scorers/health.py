@@ -1,10 +1,11 @@
 """Finds episodes that are broken, as opposed to badly performed.
 
 Checks: the number of frames against the metadata, missing values, dropped
-frames in the timestamps, cameras that freeze, lose frames or cannot be read,
-and an episode far shorter than is normal for its task. The score is the
+frames in the timestamps, a robot that jumps in one frame as if frames
+between were lost, cameras that freeze, lose frames or cannot be read, and an
+episode far shorter than is normal for its task. The score is the
 fraction of the episode that no problem touches, less a fixed amount for a
-very short episode.
+very short episode and for one with a jump.
 
 How well the robot follows its commands is not judged here. A robot pushed
 off its command by contact is part of doing the task, so that check belongs
@@ -20,7 +21,7 @@ import numpy.typing as npt
 
 from bowerbird.core import episodes, scores
 from bowerbird.io import video
-from bowerbird.scorers import motion, signals
+from bowerbird.scorers import motion, signals, smoothness
 
 _GAP_RATIO = 1.5
 # An episode this much shorter than is normal for its task was probably cut
@@ -38,6 +39,15 @@ _FROZEN_SECONDS = 0.5
 _KEYFRAME_FRAMES = 2
 _FROZEN_STILL_FRACTION = 0.8
 _FRAME_COUNT_TOLERANCE = 1
+# A robot cannot move far faster than it ever normally does for one frame and
+# carry on as before. A step this many times the dataset's fast speed, and
+# this many times the steps either side of it, means frames are missing.
+_JUMP_PERCENTILE = 99.0
+_JUMP_RATIO = 2.0
+_JUMP_ISOLATION = 2.0
+# A jump touches two frames but spoils the motion around it, so an episode
+# with any loses a fixed amount.
+_JUMP_PENALTY = 0.25
 
 
 @dataclass
@@ -65,7 +75,7 @@ class HealthScorer:
               downloads the video files.
         """
         self.check_video = check_video
-        self.version = "5" if check_video else "5-novideo"
+        self.version = "6" if check_video else "6-novideo"
 
     def score(self, episodes: Iterable[episodes.Episode]) -> Iterator[scores.EpisodeScore]:
         """Scores each episode.
@@ -83,6 +93,10 @@ class HealthScorer:
             if position is not None:
                 position_limits.update(position)
 
+        speeds = [_arm_speed(episode, position_limits) for episode in episode_list]
+        moving = [speed for speed in speeds if len(speed)]
+        fast = float(np.percentile(np.concatenate(moving), _JUMP_PERCENTILE)) if moving else 0.0
+
         groups = signals.task_groups(episode_list)
         lengths_by_group: dict[tuple[str, ...], list[int]] = {}
         for episode, group in zip(episode_list, groups, strict=True):
@@ -90,9 +104,13 @@ class HealthScorer:
                 lengths_by_group.setdefault(group, []).append(episode.length)
         medians = {group: float(np.median(lengths)) for group, lengths in lengths_by_group.items()}
 
-        for episode, group in zip(episode_list, groups, strict=True):
+        for episode, group, speed in zip(episode_list, groups, speeds, strict=True):
             draft = self._draft(episode, position_limits)
+            jumps = _jumps(episode, speed, fast)
+            draft.segments.extend(jumps)
             score = 1.0 - signals.coverage(draft.segments, draft.rows) if draft.rows else 0.0
+            if jumps:
+                score -= _JUMP_PENALTY
             # A task with too few episodes has no reliable normal length.
             median = medians.get(group) if group is not None else None
             if median and episode.length < _SHORT_RATIO * median:
@@ -159,6 +177,55 @@ def _missing_values(episode: episodes.Episode) -> list[scores.Segment]:
         for start, stop in signals.runs(bad):
             reason = f"missing values in {column}"
             segments.append(scores.Segment(start, stop, 0.0, reason, column))
+    return segments
+
+
+def _arm_speed(episode: episodes.Episode, position_limits: signals.Limits) -> npt.NDArray[Any]:
+    """Measures how fast the arm moves between each pair of frames.
+
+    Args:
+        episode: The episode.
+        position_limits: The range of the position signal over the dataset.
+
+    Returns:
+        One speed per pair of frames, in ranges per second. Empty if the
+        episode has no position signal or fewer than two frames.
+    """
+    position = signals.positions(episode)
+    column = signals.position_column(episode)
+    if position is None or column is None or len(position) < 2:
+        return np.zeros(0)
+    grippers = signals.gripper_dimensions(episode.names(column), position.shape[1])
+    arm = [i for i in range(position.shape[1]) if i not in grippers]
+    if not arm:
+        return np.zeros(0)
+    return smoothness.arm_speed(position, position_limits.span, arm, episode.fps)
+
+
+def _jumps(episode: episodes.Episode, speed: npt.NDArray[Any], fast: float) -> list[scores.Segment]:
+    """Flags frames where the robot is suddenly somewhere else.
+
+    Args:
+        episode: The episode to check.
+        speed: The arm's speed between each pair of frames, from `_arm_speed`.
+        fast: The speed that the dataset's fastest ordinary motion reaches.
+
+    Returns:
+        One segment per jump, covering the frames either side of it.
+    """
+    if len(speed) < 3 or fast <= 0:
+        return []
+    before = np.concatenate(([0.0], speed[:-1]))
+    after = np.concatenate((speed[1:], [0.0]))
+    is_jump = (speed > _JUMP_RATIO * fast) & (speed > _JUMP_ISOLATION * np.maximum(before, after))
+    column = signals.position_column(episode) or ""
+    segments = []
+    for frame in np.flatnonzero(is_jump).tolist():
+        reason = (
+            f"robot jumped in one frame, {speed[frame] / fast:.0f}x faster than it normally "
+            "moves; frames may be missing"
+        )
+        segments.append(scores.Segment(frame, frame + 2, 0.0, reason, column))
     return segments
 
 

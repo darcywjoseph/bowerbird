@@ -135,6 +135,44 @@ def test_motion_skips_jump_checks_for_relative_commands() -> None:
         assert not flagged, flagged
 
 
+def test_motion_counts_a_large_jump_in_a_relative_command_when_it_is_rare() -> None:
+    names = ("dx", "dy", "gripper")
+    generator = np.random.default_rng(0)
+    episodes = []
+    for index in range(30):
+        steps = generator.normal(0.0, 0.2, (LENGTH, 2)).clip(-1.0, 1.0)
+        steps[:, 0] = np.convolve(steps[:, 0], np.ones(5) / 5, mode="same")
+        steps[:, 1] = np.convolve(steps[:, 1], np.ones(5) / 5, mode="same")
+        steps[0], steps[-1] = (1.0, 1.0), (-1.0, -1.0)  # the command's full range
+        if index == 29:
+            steps[50, 0] = -1.0 if steps[50, 0] > 0 else 1.0
+        position = np.cumsum(steps, axis=0) * 0.01
+        state = np.concatenate((np.zeros((1, 2)), position[:-1]))
+        action = np.column_stack((steps, np.zeros(LENGTH)))
+        padded = np.column_stack((state, np.zeros(LENGTH)))
+        episodes.append(conftest.make_episode(index, padded, action, action_names=names))
+
+    scores = list(motion.MotionScorer().score(episodes))
+
+    jumps = [[s for s in score.segments if "jumped" in s.reason] for score in scores]
+    assert [segment.start_frame for segment in jumps[29]] == [50]
+    assert not any(jumps[:29])
+
+
+def test_health_flags_a_robot_that_jumps_as_if_frames_were_lost() -> None:
+    whole = _smooth(length=140)
+    episodes = [conftest.make_episode(index, _smooth(index)) for index in range(6)]
+    episodes.append(conftest.make_episode(6, np.delete(whole, slice(60, 75), axis=0)))
+
+    scorer = health.HealthScorer(check_video=False)
+    scores = list(scorer.score(episodes))
+
+    for score in scores[:6]:
+        assert score.score == 1.0, score.segments
+    assert [segment.start_frame for segment in scores[6].segments] == [59]
+    assert "frames may be missing" in scores[6].segments[0].reason
+
+
 def test_health_flags_broken_recordings() -> None:
     def following(index: int) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         action = _smooth(index)
@@ -144,7 +182,7 @@ def test_health_flags_broken_recordings() -> None:
     clean = [conftest.make_episode(index, *following(index)) for index in range(6)]
 
     state, action = following(0)
-    state[30:50] = state[30]
+    state[30:] = state[30]
     stuck = conftest.make_episode(6, state, action)
 
     state, action = following(0)

@@ -9,8 +9,9 @@ as a joint's resting position is judged within each task.
 
 The jump and edge-of-range checks assume a command is a position to move to.
 Some robots are commanded by how far to move each step instead, and for
-those a one-frame jump or a command held at full size is ordinary. The two
-checks are skipped when the states show that commands are of that kind.
+those a small one-frame jump or a command held at full size is ordinary. When
+the states show that commands are of that kind, only a jump across much of
+the range is counted and the edge-of-range check is skipped.
 
 Two more checks compare an episode with the others on its task: how smooth
 its motion is, by the spectral arc length of its speed, and how far the robot
@@ -39,6 +40,13 @@ _IDLE_SECONDS = 0.5
 _IDLE_EDGE_WEIGHT = 0.5
 # A command must leave its neighbours by this fraction of its range to be a spike.
 _SPIKE_SIZE = 0.02
+# A command that says how far to move is jumpy by nature, so only a jump across
+# much of its range is counted.
+_SPIKE_SIZE_RELATIVE = 0.4
+# Some operators drive with taps, as from a keyboard, and then large jumps in
+# such a command are how the data normally looks. If more than this share of
+# episodes have one, they are not counted.
+_SPIKE_COMMON = 0.1
 # Everything around a spike must move less than this fraction of the spike's
 # size. That is what separates a glitch from a quick tap or a change of direction.
 _SPIKE_QUIET = 0.5
@@ -72,7 +80,7 @@ class _Draft:
     length: int
     fps: float
     segments: list[scores.Segment] = field(default_factory=list)
-    spikes: int = 0
+    spikes: list[scores.Segment] = field(default_factory=list)
     pinned: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
     chatter_clusters: int = 0
     idle_frames: float = 0.0
@@ -87,7 +95,7 @@ class MotionScorer:
     """Scores an episode by how direct and smooth its motion is."""
 
     name = "motion"
-    version = "8"
+    version = "9"
     requires: frozenset[scores.Requirement] = frozenset()
 
     def score(self, episodes: Iterable[episodes.Episode]) -> Iterator[scores.EpisodeScore]:
@@ -123,6 +131,10 @@ class MotionScorer:
             _draft(episode, position_limits, action_limits, lag, positional)
             for episode in episode_list
         ]
+        with_spikes = sum(bool(draft.spikes) for draft in drafts)
+        if not positional and with_spikes > _SPIKE_COMMON * len(drafts):
+            for draft in drafts:
+                draft.spikes = []
         groups = signals.task_groups(episode_list)
         fps = episode_list[0].fps if episode_list else 1.0
         off_command = tracking.segments(
@@ -174,8 +186,8 @@ def _draft(
         action_limits: The range of the actions over the dataset.
         lag: How many frames the robot takes to respond to a command, or None
           if states do not follow actions in this dataset.
-        positional: Whether actions are positions to move to. If not, the
-          jump and edge-of-range checks are skipped.
+        positional: Whether actions are positions to move to. If not, only
+          large jumps are counted and the edge-of-range check is skipped.
 
     Returns:
         The episode's idle and gripper segments, and the raw material for the
@@ -217,17 +229,16 @@ def _draft(
             reason = f"gripper toggled {toggles} times in {signals.seconds(stop - start, fps)}"
             draft.segments.append(scores.Segment(start, stop, 0.0, reason, _ACTION, (dimension,)))
             draft.chatter_clusters += 1
-    if not positional:
-        return draft
-
     names = episode.names(episodes.ACTION_COLUMN)
+    smallest = _SPIKE_SIZE if positional else _SPIKE_SIZE_RELATIVE
     for dimension in arm:
-        for frame, size in _spikes(normalised[:, dimension]):
+        for frame, size in _spikes(normalised[:, dimension], smallest):
             label = names[dimension] if dimension < len(names) else f"#{dimension}"
             reason = f"action {label} jumped {size:.0%} of its range and back in one frame"
             segment = scores.Segment(frame, frame + 1, 0.0, reason, _ACTION, (dimension,))
-            draft.segments.append(segment)
-            draft.spikes += 1
+            draft.spikes.append(segment)
+    if not positional:
+        return draft
 
     at_limit = (normalised < _PINNED_MARGIN) | (normalised > 1 - _PINNED_MARGIN)
     for dimension in arm:
@@ -260,7 +271,7 @@ def _idle_kind(start: int, stop: int, length: int, fps: float) -> tuple[str, flo
     return f"paused for {duration} mid-episode", 1.0
 
 
-def _spikes(command: npt.NDArray[Any]) -> list[tuple[int, float]]:
+def _spikes(command: npt.NDArray[Any], smallest: float) -> list[tuple[int, float]]:
     """Finds frames where a command jumps away from its neighbours and back.
 
     A spike is one frame that sits far from the frames either side of it,
@@ -271,6 +282,7 @@ def _spikes(command: npt.NDArray[Any]) -> list[tuple[int, float]]:
 
     Args:
         command: One action dimension, scaled so its dataset range is 0 to 1.
+        smallest: The least distance from its neighbours that counts.
 
     Returns:
         Each spike's frame and its size as a fraction of the range.
@@ -281,7 +293,7 @@ def _spikes(command: npt.NDArray[Any]) -> list[tuple[int, float]]:
     size = np.abs(centre - (command[1:-3] + command[3:-1]) / 2)
     quiet = _SPIKE_QUIET * size
     is_spike = (
-        (size > _SPIKE_SIZE)
+        (size > smallest)
         & (np.abs(command[3:-1] - command[1:-3]) < quiet)
         & (np.abs(command[1:-3] - command[:-4]) < quiet)
         & (np.abs(command[4:] - command[3:-1]) < quiet)
@@ -431,14 +443,14 @@ def _finish(
 
     penalty = (
         idle_fraction
-        + _SPIKE_PENALTY * draft.spikes
+        + _SPIKE_PENALTY * len(draft.spikes)
         + _CHATTER_PENALTY * draft.chatter_clusters
         + pinned_fraction
         + signals.coverage(off_command, length)
         + compared[0]
     )
     segments = sorted(
-        [*draft.segments, *pinned_segments, *off_command, *compared[1]],
+        [*draft.segments, *draft.spikes, *pinned_segments, *off_command, *compared[1]],
         key=lambda s: s.start_frame,
     )
     return scores.EpisodeScore(

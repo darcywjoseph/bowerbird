@@ -8,12 +8,14 @@ the benchmark uses them to check that a scorer finds the weaker operators.
 import json
 import pathlib
 import shutil
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
 import h5py
 import huggingface_hub
 import numpy as np
+import numpy.typing as npt
 import pyarrow as pa
 import pyarrow.parquet as pq
 from lerobot.datasets import lerobot_dataset
@@ -62,6 +64,21 @@ class Label:
     demo: str
     skill: str | None
     operator: int | None
+
+
+@dataclass
+class Recording:
+    """One episode's numbers.
+
+    Attributes:
+        state: The robot's state, shaped (frames, 9).
+        objects: The objects' state, shaped (frames, any).
+        actions: The commands, shaped (frames, 7).
+    """
+
+    state: npt.NDArray[Any]
+    objects: npt.NDArray[Any]
+    actions: npt.NDArray[Any]
 
 
 def download(task: str, data_set: str, folder: pathlib.Path) -> pathlib.Path:
@@ -121,32 +138,14 @@ def convert(source: pathlib.Path, root: pathlib.Path, task: str) -> pathlib.Path
         missing = [key for key in (*_ROBOT_PARTS, _OBJECT_PART) if key not in first]
         if missing:
             raise errors.DatasetError(f"{source} has no observation named {', '.join(missing)}.")
-        object_width = int(first[_OBJECT_PART].shape[1])
 
-        dataset = lerobot_dataset.LeRobotDataset.create(
-            repo_id=f"bowerbird/robomimic_{root.name}",
-            fps=fps,
-            root=root,
-            robot_type="panda",
-            use_videos=False,
-            features=_features(object_width),
-        )
-        for demo in demos:
-            group = data[demo]
-            state = np.concatenate([group["obs"][key][:] for key in _ROBOT_PARTS], axis=1)
-            objects = group["obs"][_OBJECT_PART][:]
-            actions = group["actions"][:]
-            for frame in range(len(actions)):
-                dataset.add_frame(
-                    {
-                        STATE: state[frame].astype(np.float32),
-                        ENVIRONMENT_STATE: objects[frame].astype(np.float32),
-                        "action": actions[frame].astype(np.float32),
-                        "task": _TASKS[task],
-                    }
-                )
-            dataset.save_episode()
-        dataset.finalize()
+        def recordings() -> Iterator[Recording]:
+            for demo in demos:
+                group = data[demo]
+                state = np.concatenate([group["obs"][key][:] for key in _ROBOT_PARTS], axis=1)
+                yield Recording(state, group["obs"][_OBJECT_PART][:], group["actions"][:])
+
+        write(root, recordings(), fps=fps, task=_TASKS[task])
         labels = _labels(file, demos)
 
     side = root / LABELS_FILE
@@ -164,6 +163,40 @@ def convert(source: pathlib.Path, root: pathlib.Path, task: str) -> pathlib.Path
     )
     (root / ENVIRONMENT_FILE).write_text(json.dumps(environment, indent=2))
     return root
+
+
+def write(root: pathlib.Path, recordings: Iterable[Recording], *, fps: int, task: str) -> None:
+    """Writes episodes as a LeRobot dataset.
+
+    Args:
+        root: The folder to write to. It must not exist.
+        recordings: The episodes, in order.
+        fps: Frames per second.
+        task: The task's description, stored with every frame.
+    """
+    dataset = None
+    for recording in recordings:
+        if dataset is None:
+            dataset = lerobot_dataset.LeRobotDataset.create(
+                repo_id=f"bowerbird/robomimic_{root.name}",
+                fps=fps,
+                root=root,
+                robot_type="panda",
+                use_videos=False,
+                features=_features(recording.objects.shape[1]),
+            )
+        for frame in range(len(recording.actions)):
+            dataset.add_frame(
+                {
+                    STATE: recording.state[frame].astype(np.float32),
+                    ENVIRONMENT_STATE: recording.objects[frame].astype(np.float32),
+                    "action": recording.actions[frame].astype(np.float32),
+                    "task": task,
+                }
+            )
+        dataset.save_episode()
+    if dataset is not None:
+        dataset.finalize()
 
 
 def read_labels(root: pathlib.Path) -> list[Label]:
