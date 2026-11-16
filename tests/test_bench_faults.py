@@ -10,7 +10,7 @@ h5py = pytest.importorskip("h5py")
 pytest.importorskip("lerobot")
 pytest.importorskip("robosuite")
 
-from bowerbird.bench import detection, faults, robomimic  # noqa: E402
+from bowerbird.bench import detection, faults, robomimic, runs  # noqa: E402
 
 EPISODES = 30
 LENGTH = 120
@@ -92,3 +92,15 @@ def test_the_scorers_find_the_faults_they_are_built_for(clean: pathlib.Path) -> 
 def test_reading_faults_from_an_undamaged_dataset_fails(clean: pathlib.Path) -> None:
     with pytest.raises(bowerbird.DatasetError, match="no record of faults"):
         faults.read(clean)
+
+
+def test_the_fault_rules_drop_the_damaged_episodes(clean: pathlib.Path) -> None:
+    target = clean.parent / "rules"
+    damaged = {fault.episode for fault in faults.damage(clean, target, share=0.2, seed=0)}
+
+    oracle = runs.choose(target, "oracle", 0.8, seed=0)
+    curated = runs.choose(target, "curated", 0.8, seed=0)
+
+    assert set(oracle) == set(range(EPISODES)) - damaged
+    assert len(curated) == EPISODES - len(damaged)
+    assert not set(curated) & damaged

@@ -87,12 +87,27 @@ def _parser() -> argparse.ArgumentParser:
     run = steps.add_parser("run", help="curate by one rule, train a policy and test it")
     run.add_argument("dataset", help="a dataset folder made by `bowerbird bench prepare`")
     run.add_argument("output", help="the folder for this run's checkpoints and result")
-    run.add_argument("--rule", required=True, help="all, random, length, motion or operator")
+    run.add_argument(
+        "--rule", required=True, help="all, random, length, motion, operator, curated or oracle"
+    )
     run.add_argument("--fraction", type=float, default=0.5, help="the share of episodes to keep")
     run.add_argument("--seed", type=int, default=0, help="the training seed")
     run.add_argument("--steps", type=int, required=True, help="the number of training steps")
     run.add_argument("--attempts", type=int, default=200, help="how many test attempts to run")
     run.add_argument("--device", help="cuda, mps or cpu (default: the best available)")
+    whole = steps.add_parser("round", help="run every condition of the protocol for one task")
+    whole.add_argument("folder", help="the folder for the datasets and runs")
+    whole.add_argument("task", help="lift, can or square")
+    whole.add_argument("--steps", type=int, required=True, help="training steps per run")
+    whole.add_argument("--seeds", type=int, default=5, help="how many training seeds")
+    whole.add_argument("--attempts", type=int, default=200, help="test attempts per run")
+    whole.add_argument(
+        "--shard", default="0/1", help="this machine's share of the runs, as number/machines"
+    )
+    whole.add_argument("--device", help="cuda, mps or cpu (default: the best available)")
+    report = steps.add_parser("report", help="write up the finished runs of one task")
+    report.add_argument("folder", help="the folder given to `bowerbird bench round`")
+    report.add_argument("task", help="lift, can or square")
     return parser
 
 
@@ -160,7 +175,7 @@ def _bench(arguments: argparse.Namespace) -> None:
         ScorerError: The benchmark's extra dependencies are not installed.
     """
     try:
-        from bowerbird.bench import detection, faults, robomimic, runs
+        from bowerbird.bench import detection, faults, robomimic, rounds, runs
     except ImportError as error:
         raise errors.ScorerError(
             f"The benchmark needs extra packages ({error.name} is missing). "
@@ -194,6 +209,27 @@ def _bench(arguments: argparse.Namespace) -> None:
         print(f"All damaged episodes: separation {found.separation:.2f}")
         for name, share in found.false_alarms.items():
             print(f"{name} flags {share:.0%} of the {found.undamaged} undamaged episodes")
+        return
+    if arguments.step == "round":
+        try:
+            index, count = (int(part) for part in arguments.shard.split("/"))
+        except ValueError:
+            raise errors.ScorerError(
+                f"Not a shard: {arguments.shard!r}. Write it as number/machines, such as 0/4."
+            ) from None
+        rounds.execute(
+            pathlib.Path(arguments.folder),
+            arguments.task,
+            seeds=arguments.seeds,
+            steps=arguments.steps,
+            attempts=arguments.attempts,
+            shard=(index, count),
+            device=arguments.device,
+            log=print,
+        )
+        return
+    if arguments.step == "report":
+        print(rounds.report(pathlib.Path(arguments.folder), arguments.task))
         return
     runs.run(
         pathlib.Path(arguments.dataset),
