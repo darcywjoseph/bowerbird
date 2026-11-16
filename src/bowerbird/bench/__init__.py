@@ -2,3 +2,10 @@
 
 Needs the ``bench`` extra, which installs the simulator and training libraries.
 """
+
+import os
+
+# The benchmark never draws a picture. On a machine with no display the
+# simulator's other graphics settings fail when it is imported, and this one
+# does not.
+os.environ.setdefault("MUJOCO_GL", "glfw")
