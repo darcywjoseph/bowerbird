@@ -215,7 +215,8 @@ def _missing_values(episode: episodes.Episode) -> list[scores.Segment]:
         if not episode.has_column(column):
             continue
         values = episode.column(column).astype(np.float64)
-        bad = ~np.isfinite(values.reshape(len(values), -1)).all(axis=1)
+        finite = np.isfinite(values.reshape(len(values), -1)).all(axis=1)
+        bad: npt.NDArray[np.bool_] = np.asarray(~finite)
         for start, stop in signals.runs(bad):
             segments.append(scores.Segment(start, stop, 0.0, f"missing values in {column}"))
     return segments
@@ -239,7 +240,8 @@ def _timestamp_faults(episode: episodes.Episode) -> list[scores.Segment]:
         dropped = round(steps[frame] / expected) - 1
         reason = f"{dropped} frames dropped ({steps[frame]:.2f} s gap in the timestamps)"
         segments.append(scores.Segment(frame, frame + 2, 0.0, reason))
-    for start, stop in signals.runs(steps <= 0):
+    backwards: npt.NDArray[np.bool_] = np.asarray(steps <= 0)
+    for start, stop in signals.runs(backwards):
         segments.append(scores.Segment(start, stop + 1, 0.0, "timestamps do not increase"))
     return segments
 

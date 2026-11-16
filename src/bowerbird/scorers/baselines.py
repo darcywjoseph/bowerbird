@@ -2,8 +2,10 @@
 
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from bowerbird.core import episodes, scores
 
@@ -47,7 +49,7 @@ class LengthScorer:
             yield scores.EpisodeScore(index, _shortness(peers, length), segments)
 
 
-def _shortness(sorted_lengths: np.ndarray, length: int) -> float:
+def _shortness(sorted_lengths: npt.NDArray[Any], length: int) -> float:
     """Ranks a length among its peers.
 
     Args:
