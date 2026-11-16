@@ -3,7 +3,8 @@
 The checks are in the spirit of the motion rules used by RINSE and DQAF: time
 spent idle, a command that jumps away and straight back, a gripper that opens
 and closes repeatedly, and commands held at the edge of their range. Sizes
-are measured against each signal's range over the whole dataset.
+are measured against each signal's range over the whole dataset. What counts
+as a joint's resting position is judged within each task.
 
 There is no general smoothness check. An earlier one flagged ordinary quick
 movements, and a smoothness measure should come from a published method that
@@ -24,6 +25,9 @@ from bowerbird.scorers import signals
 # Slower than this fraction of the range per second counts as not moving.
 IDLE_SPEED = 0.02
 _IDLE_SECONDS = 0.5
+# Stillness before the task starts or after it ends can be trimmed away, so it
+# counts for less than a pause in the middle of the task.
+_IDLE_EDGE_WEIGHT = 0.5
 # A command must leave its neighbours by this fraction of its range to be a spike.
 _SPIKE_SIZE = 0.02
 # Everything around a spike must move less than this fraction of the spike's
@@ -53,13 +57,14 @@ class _Draft:
     spikes: int = 0
     pinned: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
     chatter_clusters: int = 0
+    idle_frames: float = 0.0
 
 
 class MotionScorer:
     """Scores an episode by how direct and smooth its motion is."""
 
     name = "motion"
-    version = "4"
+    version = "5"
     requires: frozenset[scores.Requirement] = frozenset()
 
     def score(self, episodes: Iterable[episodes.Episode]) -> Iterator[scores.EpisodeScore]:
@@ -90,9 +95,15 @@ class MotionScorer:
                 action_limits.update(action)
 
         drafts = [_draft(episode, position_limits, action_limits) for episode in episode_list]
-        resting = _resting_dimensions(drafts)
-        for draft, episode in zip(drafts, episode_list, strict=True):
-            yield _finish(draft, resting, episode.names(_ACTION))
+        groups = signals.task_groups(episode_list)
+        resting = {
+            group: _resting_dimensions(
+                [draft for draft, other in zip(drafts, groups, strict=True) if other == group]
+            )
+            for group in set(groups)
+        }
+        for draft, episode, group in zip(drafts, episode_list, groups, strict=True):
+            yield _finish(draft, resting[group], episode.names(_ACTION))
 
 
 def _actions(episode: episodes.Episode) -> npt.NDArray[Any] | None:
@@ -108,19 +119,6 @@ def _actions(episode: episodes.Episode) -> npt.NDArray[Any] | None:
         return None
     values = episode.actions.astype(np.float64)
     return values.reshape(len(values), -1)
-
-
-def _gripper_dimensions(names: tuple[str, ...], width: int) -> list[int]:
-    """Finds which action dimensions drive a gripper, going by their names.
-
-    Args:
-        names: The action's dimension names, possibly empty.
-        width: The number of action dimensions.
-
-    Returns:
-        The indices of the gripper dimensions.
-    """
-    return [i for i, name in enumerate(names[:width]) if "gripper" in name.lower()]
 
 
 def _draft(
@@ -142,15 +140,16 @@ def _draft(
     position = signals.positions(episode)
     if position is not None:
         idle = signals.speed(position, position_limits.span, fps) < IDLE_SPEED
+        column = signals.position_column(episode) or ""
         for start, stop in signals.runs(idle, max(2, round(_IDLE_SECONDS * fps))):
-            reason = f"idle for {signals.seconds(stop - start, fps)}"
-            column = signals.position_column(episode) or ""
+            reason, weight = _idle_kind(start, stop, len(idle), fps)
             draft.segments.append(scores.Segment(start, stop, 0.0, reason, column))
+            draft.idle_frames += weight * (stop - start)
 
     action = _actions(episode)
     if action is None or action_limits.low is None or action_limits.high is None:
         return draft
-    grippers = _gripper_dimensions(episode.names(episodes.ACTION_COLUMN), action.shape[1])
+    grippers = signals.gripper_dimensions(episode.names(episodes.ACTION_COLUMN), action.shape[1])
     arm = [i for i in range(action.shape[1]) if i not in grippers]
     normalised = (action - action_limits.low) / action_limits.span
 
@@ -175,6 +174,29 @@ def _draft(
         if pinned:
             draft.pinned[dimension] = pinned
     return draft
+
+
+def _idle_kind(start: int, stop: int, length: int, fps: float) -> tuple[str, float]:
+    """Describes an idle stretch by where in the episode it falls.
+
+    Args:
+        start: The stretch's first frame.
+        stop: One past the stretch's last frame.
+        length: The number of frames in the episode.
+        fps: Frames per second.
+
+    Returns:
+        The reason to report, and how much each idle frame counts against
+        the episode.
+    """
+    duration = signals.seconds(stop - start, fps)
+    if start == 0 and stop >= length:
+        return "idle for the whole episode", 1.0
+    if start == 0:
+        return f"idle at the start for {duration}", _IDLE_EDGE_WEIGHT
+    if stop >= length:
+        return f"idle at the end for {duration}", _IDLE_EDGE_WEIGHT
+    return f"paused for {duration} mid-episode", 1.0
 
 
 def _spikes(command: npt.NDArray[Any]) -> list[tuple[int, float]]:
@@ -276,8 +298,7 @@ def _finish(draft: _Draft, resting: set[int], action_names: tuple[str, ...]) -> 
         The episode's score and the segments that explain it.
     """
     length = max(draft.length, 1)
-    idle_segments = [s for s in draft.segments if s.reason.startswith("idle")]
-    idle_fraction = signals.coverage(idle_segments, length)
+    idle_fraction = draft.idle_frames / length
 
     pinned_segments = []
     for dimension, pinned in draft.pinned.items():

@@ -1,7 +1,8 @@
 import numpy as np
 import numpy.typing as npt
+import pytest
 
-from bowerbird.scorers import baselines, health, motion
+from bowerbird.scorers import baselines, health, motion, signals
 from tests import conftest
 
 LENGTH = 100
@@ -85,7 +86,7 @@ def test_motion_flags_idling_jumps_and_gripper_chatter() -> None:
     for index in range(6):
         assert scores[index].score == 1.0, scores[index].segments
     reasons = {index: " | ".join(s.reason for s in scores[index].segments) for index in (6, 7, 8)}
-    assert "idle for 3.0 s" in reasons[6]
+    assert "paused for 3.0 s mid-episode" in reasons[6]
     assert scores[6].score < 0.8
     assert "action shoulder jumped 50% of its range and back in one frame" in reasons[7]
     assert [s.start_frame for s in scores[7].segments] == [50]
@@ -158,3 +159,80 @@ def test_health_ignores_tracking_when_actions_are_not_targets() -> None:
     scores = list(health.HealthScorer(check_video=False).score(episodes))
 
     assert all(score.score == 1.0 for score in scores)
+
+
+def test_idle_at_the_edges_counts_half_as_much_as_a_pause() -> None:
+    def padded(before: int, middle: int, after: int) -> npt.NDArray[np.float64]:
+        wave = _smooth()
+        return np.concatenate(
+            (
+                np.repeat(wave[:1], before, axis=0),
+                wave[:50],
+                np.repeat(wave[50:51], middle, axis=0),
+                wave[50:],
+                np.repeat(wave[-1:], after, axis=0),
+            )
+        )
+
+    episodes = [
+        conftest.make_episode(0, padded(20, 0, 20)),
+        conftest.make_episode(1, padded(0, 40, 0)),
+    ]
+
+    edges, pause = motion.MotionScorer().score(episodes)
+
+    reasons = [segment.reason for segment in edges.segments]
+    assert reasons[0].startswith("idle at the start for 2.")
+    assert reasons[-1].startswith("idle at the end for 2.")
+    assert edges.segments[0].start_frame == 0
+    assert edges.segments[-1].end_frame == 140
+    assert [segment.reason for segment in pause.segments] == ["paused for 4.0 s mid-episode"]
+    assert 1 - pause.score == pytest.approx(2 * (1 - edges.score), rel=0.15)
+
+
+def test_tracking_allows_for_the_robots_response_delay() -> None:
+    def delayed(
+        index: int, lag: int = 4
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        action = _smooth(index)
+        state = np.concatenate((np.repeat(action[:1], lag, axis=0), action[:-lag])) + 0.3
+        return state, action
+
+    clean = [conftest.make_episode(index, *delayed(index)) for index in range(6)]
+    state, action = delayed(0)
+    state[40:60] = state[40]
+    stuck = conftest.make_episode(6, state, action)
+
+    scores = list(health.HealthScorer(check_video=False).score([*clean, stuck]))
+
+    assert all(score.score == 1.0 for score in scores[:6]), "a steady delay and offset are normal"
+    (segment,) = scores[6].segments
+    assert "away from its command" in segment.reason
+    assert 40 <= segment.start_frame <= 50 and 55 <= segment.end_frame <= 62
+
+
+def test_tracking_ignores_a_gripper_that_stops_short_of_its_command() -> None:
+    names = ("shoulder", "elbow", "wrist", "gripper")
+    episodes = []
+    for index in range(6):
+        arm = _smooth(index)
+        command = (np.arange(LENGTH) >= 50).astype(np.float64)
+        action = np.column_stack((arm, command))
+        state = np.column_stack((np.concatenate((arm[:1], arm[:-1])), command * 0.4))
+        episodes.append(conftest.make_episode(index, state, action, action_names=names))
+
+    scores = list(health.HealthScorer(check_video=False).score(episodes))
+
+    assert all(score.score == 1.0 for score in scores), scores[0].segments
+
+
+def test_small_tasks_are_pooled_and_large_ones_stand_alone() -> None:
+    episodes = [
+        conftest.make_episode(index, _smooth(), task="big" if index < 20 else f"small-{index}")
+        for index in range(23)
+    ]
+
+    groups = signals.task_groups(episodes)
+
+    assert groups[:20] == [("big",)] * 20
+    assert groups[20:] == [None, None, None]

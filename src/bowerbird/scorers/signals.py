@@ -1,5 +1,6 @@
 """Small numeric helpers shared by the scorers that need no GPU."""
 
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -9,6 +10,8 @@ import numpy.typing as npt
 from bowerbird.core import episodes, scores
 
 _MAD_TO_SIGMA = 1.4826
+# A task needs this many episodes before it is judged only against itself.
+MIN_TASK_EPISODES = 20
 
 
 def runs(mask: npt.NDArray[np.bool_], min_length: int = 1) -> list[tuple[int, int]]:
@@ -189,3 +192,37 @@ def position_column(episode: episodes.Episode) -> str | None:
         if episode.has_column(column):
             return column
     return None
+
+
+def gripper_dimensions(names: Sequence[str], width: int) -> list[int]:
+    """Finds which dimensions of a signal drive a gripper, going by their names.
+
+    Args:
+        names: The signal's dimension names, possibly empty.
+        width: The number of dimensions.
+
+    Returns:
+        The indices of the gripper dimensions.
+    """
+    return [i for i, name in enumerate(names[:width]) if "gripper" in name.lower()]
+
+
+def task_groups(
+    episode_list: Sequence[episodes.Episode], minimum: int = MIN_TASK_EPISODES
+) -> list[tuple[str, ...] | None]:
+    """Sorts episodes into the groups they should be compared within.
+
+    What is normal differs between tasks, so an episode is judged against
+    others on the same task. A task with too few episodes to say what is
+    normal shares one pooled group with the other small tasks.
+
+    Args:
+        episode_list: The episodes to group.
+        minimum: The fewest episodes a task needs to form its own group.
+
+    Returns:
+        A group key per episode, in order: the episode's tasks, or None for
+        the pooled group.
+    """
+    sizes = Counter(episode.tasks for episode in episode_list)
+    return [episode.tasks if sizes[episode.tasks] >= minimum else None for episode in episode_list]
