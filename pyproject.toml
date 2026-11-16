@@ -27,6 +27,7 @@ Issues = "https://github.com/darcywjoseph/bowerbird/issues"
 bench = [
     "h5py>=3.16.0",
     "lerobot[dataset,diffusion,training]>=0.7 ; python_full_version >= '3.12'",
+    "mujoco>=3.3,<3.4",
     "robosuite>=1.5",
 ]
 
