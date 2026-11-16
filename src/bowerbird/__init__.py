@@ -3,9 +3,17 @@
 from importlib.metadata import version
 
 from bowerbird.core.episodes import Episode, VideoClip
-from bowerbird.core.scores import EpisodeScore, Requirement, Scorer, ScoreTable, Segment
-from bowerbird.errors import DatasetError
+from bowerbird.core.scores import (
+    EpisodeScore,
+    EpisodeSummary,
+    Requirement,
+    Scorer,
+    ScoreTable,
+    Segment,
+)
+from bowerbird.errors import DatasetError, ScorerError
 from bowerbird.io.lerobot import Dataset, load
+from bowerbird.scoring import score
 
 __version__ = version("bowerbird")
 
@@ -14,11 +22,14 @@ __all__ = [
     "DatasetError",
     "Episode",
     "EpisodeScore",
+    "EpisodeSummary",
     "Requirement",
     "ScoreTable",
     "Scorer",
+    "ScorerError",
     "Segment",
     "VideoClip",
     "__version__",
     "load",
+    "score",
 ]

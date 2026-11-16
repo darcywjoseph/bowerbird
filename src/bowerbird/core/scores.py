@@ -1,7 +1,7 @@
 """Scores, the scorer interface, and the table that stores scores on disk."""
 
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from importlib import metadata
@@ -13,6 +13,8 @@ import pyarrow.parquet as pq
 
 from bowerbird.core import episodes
 
+# Scorers that exist to be compared against, and so stay out of the overall score.
+BASELINES = frozenset({"length", "random"})
 _FINGERPRINT_KEY = b"bowerbird.dataset_fingerprint"
 _VERSION_KEY = b"bowerbird.version"
 _SEGMENT_TYPE = pa.struct(
@@ -75,6 +77,32 @@ class EpisodeScore:
     segments: tuple[Segment, ...] = ()
 
 
+@dataclass(frozen=True)
+class EpisodeSummary:
+    """Every scorer's verdict on one episode, combined.
+
+    Attributes:
+        index: The episode's index in the dataset.
+        score: The overall score, from 0 (worst) to 1 (best).
+        scores: Each scorer's score for the episode.
+        segments: Each flagged frame range, with the scorer that flagged it.
+    """
+
+    index: int
+    score: float
+    scores: dict[str, float]
+    segments: tuple[tuple[str, Segment], ...]
+
+    @property
+    def reasons(self) -> tuple[str, ...]:
+        """The reasons behind the scores, longest segment first, no repeats."""
+        ordered = sorted(
+            (segment for _, segment in self.segments),
+            key=lambda segment: segment.start_frame - segment.end_frame,
+        )
+        return tuple(dict.fromkeys(segment.reason for segment in ordered))
+
+
 class Scorer(Protocol):
     """Anything that turns episodes into scores.
 
@@ -125,7 +153,14 @@ class ScoreTable:
         """The names of the scorers that have scores in the table."""
         return tuple(self._scores)
 
-    def add(self, scorer: str, version: str, scores: Iterable[EpisodeScore]) -> None:
+    def add(
+        self,
+        scorer: str,
+        version: str,
+        scores: Iterable[EpisodeScore],
+        *,
+        replace: bool = False,
+    ) -> None:
         """Stores a scorer's scores.
 
         Scores from a different version of the same scorer are dropped first,
@@ -136,8 +171,9 @@ class ScoreTable:
             version: The scorer's version.
             scores: The scores to store. A score for an episode that already
               has one from this scorer replaces it.
+            replace: Whether to drop all of the scorer's stored scores first.
         """
-        if self._versions.get(scorer) != version:
+        if replace or self._versions.get(scorer) != version:
             self._scores[scorer] = {}
         self._versions[scorer] = version
         for score in scores:
@@ -176,6 +212,79 @@ class ScoreTable:
         """
         self.get(scorer)
         return self._versions[scorer]
+
+    def summaries(self, scorers: Sequence[str] | None = None) -> list[EpisodeSummary]:
+        """Combines the scorers' verdicts into one summary per episode.
+
+        Args:
+            scorers: The scorers whose mean gives the overall score. Defaults
+              to every scorer in the table except the length and random
+              baselines, or to all of them if there is nothing else.
+
+        Returns:
+            One summary per episode, ordered by episode index.
+
+        Raises:
+            KeyError: The table has no scores from one of the scorers.
+        """
+        if scorers is None:
+            scorers = [name for name in self._scores if name not in BASELINES] or self.scorers
+        for scorer in scorers:
+            self.get(scorer)
+        indices = sorted({index for scores in self._scores.values() for index in scores})
+        summaries = []
+        for index in indices:
+            by_scorer = {
+                name: scores[index] for name, scores in self._scores.items() if index in scores
+            }
+            counted = [by_scorer[name].score for name in scorers if name in by_scorer]
+            segments = tuple(
+                (name, segment) for name, score in by_scorer.items() for segment in score.segments
+            )
+            summaries.append(
+                EpisodeSummary(
+                    index=index,
+                    score=sum(counted) / len(counted) if counted else float("nan"),
+                    scores={name: score.score for name, score in by_scorer.items()},
+                    segments=segments,
+                )
+            )
+        return summaries
+
+    def worst(self, count: int, scorers: Sequence[str] | None = None) -> list[EpisodeSummary]:
+        """Returns the lowest-scoring episodes.
+
+        Args:
+            count: How many episodes to return.
+            scorers: The scorers whose mean gives the overall score. See
+              `summaries` for the default.
+
+        Returns:
+            Up to `count` summaries, worst first.
+        """
+        ranked = sorted(self.summaries(scorers), key=lambda summary: (summary.score, summary.index))
+        return ranked[:count]
+
+    def keep_episodes(self, fraction: float, scorers: Sequence[str] | None = None) -> list[int]:
+        """Picks the best-scoring episodes to train on.
+
+        Args:
+            fraction: The share of episodes to keep, from 0 to 1.
+            scorers: The scorers whose mean gives the overall score. See
+              `summaries` for the default.
+
+        Returns:
+            The indices of the episodes to keep, in ascending order.
+
+        Raises:
+            ValueError: The fraction is outside 0 to 1.
+        """
+        if not 0 <= fraction <= 1:
+            raise ValueError(f"Not a fraction between 0 and 1: {fraction=}")
+        ranked = sorted(
+            self.summaries(scorers), key=lambda summary: (-summary.score, summary.index)
+        )
+        return sorted(summary.index for summary in ranked[: round(fraction * len(ranked))])
 
     def save(self, path: str | Path) -> None:
         """Writes the table to a Parquet file, replacing any existing file.

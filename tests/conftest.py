@@ -1,13 +1,18 @@
 """A tiny synthetic LeRobot v3 dataset, written fresh for each test."""
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
+import av
 import numpy as np
+import numpy.typing as npt
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+
+from bowerbird.core import episodes
 
 FPS = 10
 CAMERA = "observation.images.front"
@@ -23,6 +28,7 @@ def write_dataset(
     *,
     episodes_per_file: int = 2,
     codebase_version: str = "v3.0",
+    frozen: Mapping[int, tuple[int, int]] | None = None,
 ) -> Path:
     """Writes a dataset whose values encode where they came from.
 
@@ -34,6 +40,8 @@ def write_dataset(
         lengths: The number of frames in each episode.
         episodes_per_file: How many episodes share one data and video file.
         codebase_version: The format version to declare.
+        frozen: For each episode listed, a frame range over which its video
+          repeats one picture.
 
     Returns:
         The dataset folder.
@@ -58,6 +66,7 @@ def write_dataset(
 
     episode_rows = []
     frames_by_file: dict[int, list[pa.Table]] = {}
+    pictures_by_file: dict[int, list[int]] = {}
     seconds_by_file: dict[int, float] = {}
     global_index = 0
     for episode_index, length in enumerate(lengths):
@@ -83,12 +92,69 @@ def write_dataset(
         frames_by_file.setdefault(file_index, []).append(
             _episode_frames(episode_index, length, global_index)
         )
+        freeze_start, freeze_stop = (frozen or {}).get(episode_index, (0, 0))
+        pictures_by_file.setdefault(file_index, []).extend(
+            global_index + (freeze_start if freeze_start <= frame < freeze_stop else frame)
+            for frame in range(length)
+        )
         global_index += length
 
     _write_parquet(pa.Table.from_pylist(episode_rows), root / "meta/episodes/chunk-000/file-000")
     for file_index, tables in frames_by_file.items():
         _write_parquet(pa.concat_tables(tables), root / f"data/chunk-000/file-{file_index:03d}")
+    for file_index, pictures in pictures_by_file.items():
+        _write_video(root / f"videos/{CAMERA}/chunk-000/file-{file_index:03d}.mp4", pictures)
     return root
+
+
+def _write_video(path: Path, pictures: Sequence[int]) -> None:
+    """Encodes one frame per entry, each showing a square placed by its number."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with av.open(str(path), "w") as container:
+        stream = container.add_stream("mpeg4", rate=FPS)
+        stream.width = stream.height = 64
+        stream.pix_fmt = "yuv420p"
+        for number in pictures:
+            picture = np.zeros((64, 64, 3), dtype=np.uint8)
+            x, y = (7 * number) % 48, (5 * number) % 48
+            picture[y : y + 16, x : x + 16] = 255
+            for packet in stream.encode(av.VideoFrame.from_ndarray(picture, format="rgb24")):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+
+
+def make_episode(
+    index: int,
+    states: npt.NDArray[Any] | None = None,
+    actions: npt.NDArray[Any] | None = None,
+    *,
+    length: int | None = None,
+    timestamps: npt.NDArray[Any] | None = None,
+    task: str = TASK,
+    action_names: tuple[str, ...] = (),
+) -> episodes.Episode:
+    """Builds an episode straight from arrays, with no files behind it."""
+    columns: dict[str, Any] = {}
+    rows = 0
+    for name, values in (("observation.state", states), ("action", actions)):
+        if values is not None:
+            rows = len(values)
+            flat = pa.array(values.astype(np.float32).ravel())
+            columns[name] = pa.FixedSizeListArray.from_arrays(flat, values.shape[1])
+    if timestamps is None:
+        timestamps = np.arange(rows) / FPS
+    columns["timestamp"] = timestamps.astype(np.float32)
+    table = pa.table(columns)
+    return episodes.Episode(
+        index=index,
+        length=rows if length is None else length,
+        fps=FPS,
+        tasks=(task,),
+        videos={},
+        load_frames=lambda: table,
+        names={"action": action_names},
+    )
 
 
 def _episode_frames(episode_index: int, length: int, global_index: int) -> pa.Table:

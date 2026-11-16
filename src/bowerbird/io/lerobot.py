@@ -8,6 +8,7 @@ those files directly, so it does not need LeRobot or PyTorch installed.
 
 import hashlib
 import json
+import os
 import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -35,6 +36,7 @@ class Dataset:
         root: The folder that holds the dataset's ``meta`` and ``data``.
         name: The name the dataset was loaded by.
         info: The contents of ``meta/info.json``.
+        scores_path: Where scores for the dataset are kept.
     """
 
     def __init__(
@@ -44,6 +46,7 @@ class Dataset:
         name: str | None = None,
         fetch: Callable[[str], Path] | None = None,
         fingerprint: str | None = None,
+        scores_path: Path | None = None,
     ) -> None:
         """Opens a dataset folder and reads its metadata.
 
@@ -55,6 +58,8 @@ class Dataset:
               Defaults to looking inside ``root``.
             fingerprint: An identifier for this version of the dataset.
               Defaults to a hash of the metadata files.
+            scores_path: Where scores for the dataset are kept. Defaults to
+              ``bowerbird/scores.parquet`` inside ``root``.
 
         Raises:
             DatasetError: The folder is not a LeRobot v3 dataset.
@@ -63,8 +68,13 @@ class Dataset:
         self.name = name or str(root)
         self._fetch = fetch or root.joinpath
         self._fingerprint = fingerprint
+        self.scores_path = scores_path or root / "bowerbird" / "scores.parquet"
         self.info = _read_info(root)
         self._rows = _read_episode_rows(root)
+        self._names = {
+            key: _dimension_names(feature.get("names"))
+            for key, feature in self.info.get("features", {}).items()
+        }
         self._cached_file: str | None = None
         self._cached_table: pa.Table | None = None
         self._cached_bounds: dict[int, tuple[int, int]] = {}
@@ -90,6 +100,7 @@ class Dataset:
             tasks=tuple(row.get("tasks") or ()),
             videos={camera: self._clip(camera, row) for camera in self.cameras},
             load_frames=lambda: self._frames(row),
+            names=self._names,
         )
 
     def __repr__(self) -> str:
@@ -247,7 +258,9 @@ def _load_from_hub(repo_id: str, revision: str | None) -> Dataset:
             )
         )
 
-    return Dataset(root, name=repo_id, fetch=fetch, fingerprint=commit)
+    cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    scores_path = cache_home / "bowerbird" / repo_id.replace("/", "--") / commit / "scores.parquet"
+    return Dataset(root, name=repo_id, fetch=fetch, fingerprint=commit, scores_path=scores_path)
 
 
 def _read_info(root: Path) -> dict[str, Any]:
@@ -276,6 +289,23 @@ def _read_info(root: Path) -> dict[str, Any]:
             "Convert it with LeRobot's dataset conversion script, then try again."
         )
     return info
+
+
+def _dimension_names(names: Any) -> tuple[str, ...]:
+    """Flattens the ``names`` entry of a feature in ``meta/info.json``.
+
+    Args:
+        names: A list of names, a dict of lists such as ``{"motors": [...]}``,
+          or None.
+
+    Returns:
+        One name per dimension, or an empty tuple if the names are not given.
+    """
+    if isinstance(names, dict):
+        return tuple(str(name) for group in names.values() for name in group or ())
+    if isinstance(names, list):
+        return tuple(str(name) for name in names)
+    return ()
 
 
 def _read_episode_rows(root: Path) -> dict[int, dict[str, Any]]:

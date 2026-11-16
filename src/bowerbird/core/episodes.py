@@ -54,6 +54,7 @@ class Episode:
         tasks: tuple[str, ...],
         videos: Mapping[str, VideoClip],
         load_frames: Callable[[], pa.Table],
+        names: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         """Creates an episode.
 
@@ -64,6 +65,7 @@ class Episode:
             tasks: The task descriptions attached to the episode.
             videos: The episode's video clip for each camera.
             load_frames: Returns the episode's rows, one per frame.
+            names: The name of each dimension of a column, where known.
         """
         self.index = index
         self.length = length
@@ -71,7 +73,7 @@ class Episode:
         self.tasks = tasks
         self._videos = dict(videos)
         self._load_frames = load_frames
-        self._frames: pa.Table | None = None
+        self._names = dict(names or {})
 
     def __len__(self) -> int:
         return self.length
@@ -81,10 +83,31 @@ class Episode:
 
     @property
     def frames(self) -> pa.Table:
-        """The episode's rows as an Arrow table, one row per frame."""
-        if self._frames is None:
-            self._frames = self._load_frames()
-        return self._frames
+        """The episode's rows as an Arrow table, one row per frame.
+
+        The rows are read again on each use and not kept, so that holding
+        many episodes does not hold the whole dataset in memory.
+        """
+        return self._load_frames()
+
+    def has_column(self, name: str) -> bool:
+        """Returns whether the episode has a per-frame column.
+
+        Args:
+            name: The column name.
+        """
+        return name in self.frames.column_names
+
+    def names(self, column: str) -> tuple[str, ...]:
+        """Returns the name of each dimension of a column.
+
+        Args:
+            column: The column name, such as "action".
+
+        Returns:
+            The dimension names, or an empty tuple if the dataset has none.
+        """
+        return self._names.get(column, ())
 
     @property
     def columns(self) -> tuple[str, ...]:
@@ -103,12 +126,13 @@ class Episode:
         Raises:
             KeyError: The episode has no column with that name.
         """
-        if name not in self.frames.column_names:
+        frames = self.frames
+        if name not in frames.column_names:
             raise KeyError(
                 f"Episode {self.index} has no column {name!r}. "
-                f"Available columns: {', '.join(self.columns)}."
+                f"Available columns: {', '.join(frames.column_names)}."
             )
-        return _to_numpy(self.frames.column(name))
+        return _to_numpy(frames.column(name))
 
     @property
     def states(self) -> npt.NDArray[Any]:
