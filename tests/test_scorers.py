@@ -112,6 +112,29 @@ def test_motion_does_not_mistake_quick_movement_for_a_glitch() -> None:
         assert not [s for s in score.segments if "jumped" in s.reason], score.segments
 
 
+def test_motion_skips_jump_checks_for_relative_commands() -> None:
+    # The command is how far to move each step, and the state has a different
+    # layout from the action, as with an arm driven by end-effector movements.
+    names = ("dx", "dy", "gripper")
+    generator = np.random.default_rng(0)
+    episodes = []
+    for index in range(6):
+        steps = generator.uniform(-1.0, 1.0, (LENGTH, 2)).round()
+        steps[10:40, 0] = 1.0  # full speed, held: ordinary for this kind of command
+        steps[60, 1], steps[58:60, 1], steps[61:63, 1] = 1.0, 0.0, 0.0
+        position = np.cumsum(steps, axis=0) * 0.01
+        state = np.column_stack((position[:, 1], position[:, 0], position[:, 0] * 0))
+        action = np.column_stack((steps, np.zeros(LENGTH)))
+        shifted = np.concatenate((np.zeros((1, 3)), state[:-1]))
+        episodes.append(conftest.make_episode(index, shifted, action, action_names=names))
+
+    scores = list(motion.MotionScorer().score(episodes))
+
+    for score in scores:
+        flagged = [s for s in score.segments if "jumped" in s.reason or "edge" in s.reason]
+        assert not flagged, flagged
+
+
 def test_health_flags_broken_recordings() -> None:
     def following(index: int) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         action = _smooth(index)

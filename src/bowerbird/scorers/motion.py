@@ -7,6 +7,11 @@ that is far from where it was told to be. Sizes
 are measured against each signal's range over the whole dataset. What counts
 as a joint's resting position is judged within each task.
 
+The jump and edge-of-range checks assume a command is a position to move to.
+Some robots are commanded by how far to move each step instead, and for
+those a one-frame jump or a command held at full size is ordinary. The two
+checks are skipped when the states show that commands are of that kind.
+
 There is no general smoothness check. An earlier one flagged ordinary quick
 movements, and a smoothness measure should come from a published method that
 has been reproduced.
@@ -67,7 +72,7 @@ class MotionScorer:
     """Scores an episode by how direct and smooth its motion is."""
 
     name = "motion"
-    version = "6"
+    version = "7"
     requires: frozenset[scores.Requirement] = frozenset()
 
     def score(self, episodes: Iterable[episodes.Episode]) -> Iterator[scores.EpisodeScore]:
@@ -98,7 +103,11 @@ class MotionScorer:
                 action_limits.update(action)
 
         lag = tracking.find_lag(episode_list)
-        drafts = [_draft(episode, position_limits, action_limits, lag) for episode in episode_list]
+        positional = not tracking.commands_are_relative(episode_list)
+        drafts = [
+            _draft(episode, position_limits, action_limits, lag, positional)
+            for episode in episode_list
+        ]
         groups = signals.task_groups(episode_list)
         fps = episode_list[0].fps if episode_list else 1.0
         off_command = tracking.segments(
@@ -139,6 +148,7 @@ def _draft(
     position_limits: signals.Limits,
     action_limits: signals.Limits,
     lag: int | None,
+    positional: bool,
 ) -> _Draft:
     """Runs the checks that need only dataset-wide ranges.
 
@@ -148,6 +158,8 @@ def _draft(
         action_limits: The range of the actions over the dataset.
         lag: How many frames the robot takes to respond to a command, or None
           if states do not follow actions in this dataset.
+        positional: Whether actions are positions to move to. If not, the
+          jump and edge-of-range checks are skipped.
 
     Returns:
         The episode's idle and gripper segments, and the raw material for the
@@ -177,6 +189,14 @@ def _draft(
     arm = [i for i in range(action.shape[1]) if i not in grippers]
     normalised = (action - action_limits.low) / action_limits.span
 
+    for dimension in grippers:
+        for start, stop, toggles in _chatter(normalised[:, dimension], fps):
+            reason = f"gripper toggled {toggles} times in {signals.seconds(stop - start, fps)}"
+            draft.segments.append(scores.Segment(start, stop, 0.0, reason, _ACTION, (dimension,)))
+            draft.chatter_clusters += 1
+    if not positional:
+        return draft
+
     names = episode.names(episodes.ACTION_COLUMN)
     for dimension in arm:
         for frame, size in _spikes(normalised[:, dimension]):
@@ -185,12 +205,6 @@ def _draft(
             segment = scores.Segment(frame, frame + 1, 0.0, reason, _ACTION, (dimension,))
             draft.segments.append(segment)
             draft.spikes += 1
-
-    for dimension in grippers:
-        for start, stop, toggles in _chatter(normalised[:, dimension], fps):
-            reason = f"gripper toggled {toggles} times in {signals.seconds(stop - start, fps)}"
-            draft.segments.append(scores.Segment(start, stop, 0.0, reason, _ACTION, (dimension,)))
-            draft.chatter_clusters += 1
 
     at_limit = (normalised < _PINNED_MARGIN) | (normalised > 1 - _PINNED_MARGIN)
     for dimension in arm:

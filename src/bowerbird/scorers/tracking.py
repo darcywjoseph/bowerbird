@@ -21,6 +21,8 @@ _FLOOR = 0.05
 _SECONDS = 0.3
 # The longest delay between a command and the robot's response to look for.
 _MAX_LAG_SECONDS = 0.5
+# A command counts as relative only if a state's change follows it this closely.
+_RELATIVE_CORRELATION = 0.5
 _ACTION = episodes.ACTION_COLUMN
 
 
@@ -172,6 +174,88 @@ def find_lag(episode_list: Sequence[episodes.Episode]) -> int | None:
         if pair is not None:
             correlation.update(*pair)
     return correlation.best_lag()
+
+
+def relative_evidence(
+    episode_list: Sequence[episodes.Episode],
+) -> tuple[npt.NDArray[Any], npt.NDArray[Any]] | None:
+    """Measures whether each command sets where the robot is or how it moves.
+
+    A position command is followed by the state itself. A relative command,
+    which says how far to move in the next step, is followed by the change in
+    the state. Actions and states need not have the same layout: each action
+    dimension is matched with whichever state dimension follows it best.
+
+    Args:
+        episode_list: Every episode of the dataset.
+
+    Returns:
+        Two arrays with one value per arm action dimension: its best
+        correlation with a state one frame later, and its best correlation
+        with a state's change over that frame. None if the dataset lacks
+        actions or states.
+    """
+    count = 0
+    sums: list[npt.NDArray[Any]] = []
+    arm: list[int] = []
+    for episode in episode_list:
+        if not (episode.has_column(_ACTION) and episode.has_column(episodes.STATE_COLUMN)):
+            continue
+        action = episode.actions.astype(np.float64)
+        state = episode.states.astype(np.float64)
+        if action.ndim != 2 or state.ndim != 2 or len(action) < 3 or len(action) != len(state):
+            continue
+        if not sums:
+            grippers = signals.gripper_dimensions(episode.names(_ACTION), action.shape[1])
+            arm = [i for i in range(action.shape[1]) if i not in grippers]
+        command = action[:-1, arm]
+        # Columns are every state one frame on, then every state's change.
+        response = np.concatenate((state[1:], state[1:] - state[:-1]), axis=1)
+        if sums and (command.shape[1], response.shape[1]) != sums[4].shape:
+            continue
+        keep = np.isfinite(command).all(axis=1) & np.isfinite(response).all(axis=1)
+        command, response = command[keep], response[keep]
+        # Some builds of NumPy warn of overflow in a matrix product that has none.
+        with np.errstate(all="ignore"):
+            product = command.T @ response
+        parts = [
+            command.sum(0),
+            (command**2).sum(0),
+            response.sum(0),
+            (response**2).sum(0),
+            product,
+        ]
+        sums = parts if not sums else [held + part for held, part in zip(sums, parts, strict=True)]
+        count += len(command)
+    if count < 2 or not arm:
+        return None
+
+    sum_c, sum_cc, sum_r, sum_rr, sum_cr = sums
+    covariance = sum_cr - np.outer(sum_c, sum_r) / count
+    variance = np.outer(sum_cc - sum_c**2 / count, sum_rr - sum_r**2 / count)
+    with np.errstate(all="ignore"):
+        correlation = np.abs(np.where(variance > 0, covariance / np.sqrt(variance), 0.0))
+    width = correlation.shape[1] // 2
+    return correlation[:, :width].max(axis=1), correlation[:, width:].max(axis=1)
+
+
+def commands_are_relative(episode_list: Sequence[episodes.Episode]) -> bool:
+    """Decides whether the dataset's commands say how far to move each step.
+
+    Args:
+        episode_list: Every episode of the dataset.
+
+    Returns:
+        True if, for most arm dimensions, the change in the state follows the
+        command more closely than the state itself does. False otherwise,
+        including when there are no states to judge by.
+    """
+    evidence = relative_evidence(episode_list)
+    if evidence is None:
+        return False
+    position, movement = evidence
+    relative = (movement > position) & (movement > _RELATIVE_CORRELATION)
+    return bool(relative.sum() * 2 > len(relative))
 
 
 def segments(

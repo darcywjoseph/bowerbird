@@ -23,6 +23,13 @@ bowerbird = "bowerbird.cli:main"
 Repository = "https://github.com/darcywjoseph/bowerbird"
 Issues = "https://github.com/darcywjoseph/bowerbird/issues"
 
+[project.optional-dependencies]
+bench = [
+    "h5py>=3.16.0",
+    "lerobot[dataset,diffusion,training]>=0.7 ; python_full_version >= '3.12'",
+    "robosuite>=1.5",
+]
+
 [dependency-groups]
 dev = ["mypy>=1.11", "pytest>=8", "ruff>=0.6"]
 
@@ -50,7 +57,7 @@ strict = true
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["pyarrow", "pyarrow.*"]
+module = ["pyarrow", "pyarrow.*", "h5py", "h5py.*", "lerobot", "lerobot.*", "robosuite", "robosuite.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

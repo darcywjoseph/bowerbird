@@ -113,9 +113,10 @@ def _jpeg(frame: av.VideoFrame, height: int) -> bytes:
     """
     # JPEG wants even dimensions.
     width = max(2, round(frame.width * height / frame.height / 2) * 2)
-    small = frame.reformat(width=width, height=height, format="yuvj420p")
+    # Typed as Any because PyAV releases disagree on whether a timestamp may be
+    # cleared, and older ones do not type the video encoder.
+    small: Any = frame.reformat(width=width, height=height, format="yuvj420p")
     small.pts = None
-    # Typed as Any because older PyAV releases do not type the video encoder.
     encoder: Any = av.CodecContext.create("mjpeg", "w")
     encoder.width = width
     encoder.height = height
