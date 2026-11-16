@@ -52,7 +52,7 @@ class MotionScorer:
     """Scores an episode by how direct and smooth its motion is."""
 
     name = "motion"
-    version = "1"
+    version = "2"
     requires: frozenset[scores.Requirement] = frozenset()
 
     def score(self, episodes: Iterable[episodes.Episode]) -> Iterator[scores.EpisodeScore]:
@@ -258,7 +258,8 @@ def _finish(
         label = action_names[dimension] if dimension < len(action_names) else f"#{dimension}"
         for start, stop in pinned:
             reason = (
-                f"action {label} held at its limit for {signals.seconds(stop - start, draft.fps)}"
+                f"action {label} held at the edge of its recorded range "
+                f"for {signals.seconds(stop - start, draft.fps)}"
             )
             pinned_segments.append(scores.Segment(start, stop, 0.0, reason))
     pinned_fraction = signals.coverage(pinned_segments, length)
