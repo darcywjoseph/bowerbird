@@ -48,7 +48,10 @@ class Simulator:
         """
         # The simulator draws its layouts from NumPy's global generator.
         np.random.seed(seed)
-        return _observation(self._env.reset())
+        self._env.reset()
+        # The observations reset() itself returns hold zeros for the object's
+        # pose relative to the hand, so they are read again once it is done.
+        return _observation(self._env._get_observations(force_update=True))
 
     def step(self, action: npt.NDArray[Any]) -> tuple[Observation, bool]:
         """Applies one action.
