@@ -39,7 +39,7 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync --locked --extra bench
-      - run: uv run pytest tests/test_bench_robomimic.py tests/test_bench_runs.py tests/test_bench_faults.py tests/test_bench_statistics.py
+      - run: uv run pytest tests/test_bench_robomimic.py tests/test_bench_runs.py tests/test_bench_faults.py tests/test_bench_statistics.py tests/test_bench_simulator.py
 
   # The plan's target: from install to a quality report in under five minutes,
   # on a machine with no GPU, with one command. The job's time limit is the test.
